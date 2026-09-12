@@ -182,6 +182,5 @@ run_diagnostics()
 
 ## 9. 演进方向
 
-- 付费 key / BYOK 的 RPM 感知轮换（账号池的真实用武之地，见 features.md §7）
-- 探测历史的趋势命令化（目前经 `check` 展示计数，可增加逐轮 diff）
-- `docs/release.md` 已随旧文档移除；发布流程待 Phase 7 重建（tag → CI 三平台产物）
+具体迭代方案见 [roadmap.md](roadmap.md)（R1 付费 key 轮换强化 → R2 发布 0.3.0 →
+R3 趋势与事件 → R4 可靠性收尾 → R5 协议前瞻，含拒绝清单）。

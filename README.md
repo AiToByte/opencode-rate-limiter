@@ -8,7 +8,7 @@ OpenCode 免费模型限流缓解与账号池管理工具
 
 > 文档：**[使用手册](docs/user-guide.md)** · [功能介绍](docs/features.md) ·
 > [技术架构](docs/architecture.md) · [实现细节](docs/implementation.md) ·
-> **[MANUAL.md](MANUAL.md)**（命令/配置权威参考）。
+> [路线图](docs/roadmap.md) · **[MANUAL.md](MANUAL.md)**（命令/配置权威参考）。
 
 ## 快速开始
 

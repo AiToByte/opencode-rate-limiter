@@ -264,4 +264,5 @@ CLI 显式给的 `--interval/--models` 覆盖在重载后依然保留。
 | [features.md](features.md) | 每个功能的定位、行为细节与能力边界 |
 | [implementation.md](implementation.md) | 实现细节（配置合并/探测/daemon 流水/锁/诊断） |
 | [architecture.md](architecture.md) | 架构、数据流、设计决策与外部契约 |
+| [roadmap.md](roadmap.md) | 迭代路线图（R1–R5） |
 | [CHANGELOG.md](../CHANGELOG.md) | 变更记录 |
