@@ -853,3 +853,82 @@ class TestProbeBudget:
     def test_budget_validation(self):
         with pytest.raises(ValueError, match="daily_probe_budget"):
             DaemonConfig(daily_probe_budget=-1).validate()
+
+
+class TestKeyCooldownAndAttribution:
+    """R1: key 维度冷却与限流归因（daemon 集成）"""
+
+    @pytest.mark.asyncio
+    async def test_free_usage_limit_does_not_pollute_health(self, tmp_path):
+        daemon = make_daemon(
+            tmp_path,
+            models=["m1"],
+            auto_cleanup=False,
+            accounts=[{"name": "a", "auth_json": "{}"}],
+            strategy="health",
+        )
+
+        async def probe(model: str, headers: dict[str, str]) -> ProbeResult:
+            return ProbeResult(
+                model=model,
+                status="rate_limited",
+                http_status=429,
+                retry_after=120,
+                estimated_reset=120,
+                error_type="FreeUsageLimitError",
+                timestamp="t",
+            )
+
+        daemon.prober.probe = probe  # type: ignore[method-assign]
+        await daemon._probe_cycle()
+        assert daemon.pool is not None
+        assert daemon.pool.health["a"].total_count == 0  # IP 级失败不记凭证账
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_error_arms_key_cooldown(self, tmp_path):
+        daemon = make_daemon(
+            tmp_path,
+            models=["m1"],
+            auto_cleanup=False,
+            accounts=[{"name": "a", "auth_json": "{}"}],
+            strategy="health",
+        )
+
+        async def probe(model: str, headers: dict[str, str]) -> ProbeResult:
+            return ProbeResult(
+                model=model,
+                status="rate_limited",
+                http_status=429,
+                retry_after=60,
+                estimated_reset=60,
+                error_type="RateLimitError",
+                timestamp="t",
+            )
+
+        daemon.prober.probe = probe  # type: ignore[method-assign]
+        await daemon._probe_cycle()
+        assert daemon.pool is not None
+        assert daemon.pool.health["a"].key_limited_count == 1
+        assert "a" in daemon._key_cooldowns
+
+    @pytest.mark.asyncio
+    async def test_pick_account_skips_cooled(self, tmp_path):
+        daemon = make_daemon(
+            tmp_path,
+            models=["m1"],
+            auto_cleanup=False,
+            accounts=[
+                {"name": "a", "auth_json": "{}"},
+                {"name": "b", "auth_json": "{}"},
+            ],
+            strategy="round_robin",
+        )
+        daemon._key_cooldowns["a"] = float("inf")
+
+        picks = [daemon._pick_account() for _ in range(3)]
+        assert all(p is not None for p in picks)
+        picked = {p.name for p in picks if p is not None}
+        assert picked == {"b"}  # 冷却中的 a 被跳过
+
+        daemon._key_cooldowns["b"] = float("inf")
+        assert daemon._pick_account() is None  # 全部冷却 → 匿名回退

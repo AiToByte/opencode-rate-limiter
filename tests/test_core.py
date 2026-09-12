@@ -20,6 +20,7 @@ from opencode_rate_limiter import (
     JSONFormatter,
     __version__,
     build_parser,
+    cmd_check,
     cmd_deep,
     cmd_generate_config,
     cmd_quick,
@@ -752,8 +753,11 @@ class TestRotateDryRun:
         data = json.loads(capsys.readouterr().out)
         assert data["applied"] == "applied"
         assert data["auth_target"] == str(auth_target)
-        # 新内容来自选中账号的 auth_json；旧内容已备份
-        assert json.loads(auth_target.read_text(encoding="utf-8"))["access_token"] == "tok-a"
+        # 写回为 opencode 的 provider 键控形态（R1.3 归一化）
+        written = json.loads(auth_target.read_text(encoding="utf-8"))
+        assert written == {"https://opencode.ai/zen": {"type": "oauth", "access": "tok-a"}}
+        assert data["credential"] == {"kind": "oauth", "fingerprint": "…-a"}  # 短 token 只露尾 2 位
+        # 旧内容已备份
         backup = auth_target.with_suffix(".json.bak")
         assert backup.exists()
         assert json.loads(backup.read_text(encoding="utf-8"))["access_token"] == "old-token"
@@ -865,3 +869,67 @@ class TestProberConfigSection:
         loaded = Config.load(config_file)
         assert loaded.prober.endpoint == "http://localhost:1234/v1"
         assert loaded.prober.proxy == "http://127.0.0.1:7890"
+
+
+class TestApplyAuthShapes:
+    """R1: rotate --apply 的三种写回形态"""
+
+    def _patch(self, monkeypatch, tmp_path: Path) -> Path:
+        target = tmp_path / "auth.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr("opencode_rate_limiter.cli.get_opencode_auth_files", lambda: [target])
+        return target
+
+    def _run(self, auth_json: str):
+        import asyncio
+
+        config = Config(
+            account_pool=AccountPoolConfig(
+                accounts=[{"name": "a", "auth_json": auth_json}], strategy="round_robin"
+            )
+        )
+        args = argparse.Namespace(strategy="round_robin", json=True, dry_run=False, apply=True)
+        return asyncio.run(cmd_rotate(config, args))
+
+    def test_api_write_back(self, tmp_path: Path, monkeypatch):
+        target = self._patch(monkeypatch, tmp_path)
+        self._run('{"type": "api", "key": "sk-test-123"}')
+        assert json.loads(target.read_text(encoding="utf-8")) == {
+            "https://opencode.ai/zen": {"type": "api", "key": "sk-test-123"}
+        }
+
+    def test_bare_access_wrapped(self, tmp_path: Path, monkeypatch):
+        target = self._patch(monkeypatch, tmp_path)
+        self._run('{"access": "tok"}')
+        assert json.loads(target.read_text(encoding="utf-8")) == {
+            "https://opencode.ai/zen": {"type": "oauth", "access": "tok"}
+        }
+
+    def test_provider_keyed_passthrough(self, tmp_path: Path, monkeypatch):
+        target = self._patch(monkeypatch, tmp_path)
+        original = {"https://opencode.ai/zen": {"type": "oauth", "access": "t"}, "x": {"k": 1}}
+        self._run(json.dumps(original))
+        assert json.loads(target.read_text(encoding="utf-8")) == original
+
+
+class TestCheckCredentialFingerprint:
+    @pytest.mark.asyncio
+    async def test_check_reports_fingerprint(self, monkeypatch, tmp_path, capsys):
+        auth_file = tmp_path / "auth.json"
+        auth_file.write_text('{"type": "api", "key": "sk-test-1234567890"}', encoding="utf-8")
+        config = Config(
+            account_pool=AccountPoolConfig(
+                accounts=[{"name": "primary", "auth_path": str(auth_file)}],
+                strategy="health",
+            )
+        )
+        args = argparse.Namespace(json=False)
+        monkeypatch.setattr(
+            "opencode_rate_limiter.get_daemon_state_path", lambda: tmp_path / "no.json"
+        )
+
+        rc = await cmd_check(config, args)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "- primary: api (sk-tes…7890)" in out
+        assert "sk-test-1234567890" not in out  # 明文绝不出现

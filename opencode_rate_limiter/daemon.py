@@ -24,7 +24,7 @@ from .cleanup import CleanupManager
 from .config import Config
 from .headers import HeaderInjector
 from .paths import get_opencode_version
-from .pool import AccountPool
+from .pool import Account, AccountPool
 from .prober import ModelProber, ProbeResult
 
 
@@ -153,6 +153,7 @@ class RateLimiterDaemon:
         self._probe_event = asyncio.Event()
         self._error_streak = 0
         self._cooldowns: dict[str, float] = {}  # model -> monotonic deadline
+        self._key_cooldowns: dict[str, float] = {}  # account name -> monotonic deadline
         self._probe_day = ""
         self._probe_count = 0
         self._prev_handlers: dict[int, Any] = {}
@@ -287,6 +288,23 @@ class RateLimiterDaemon:
         if self._probe_event.is_set():
             self._probe_event.clear()
 
+    def _pick_account(self) -> Account | None:
+        """Pick the next account, skipping accounts in key-dimension cooldown.
+
+        Returns None when the pool is empty or every account is cooling down
+        (probes then fall back to anonymous headers).
+        """
+        if self.pool is None:
+            return None
+        now = time.monotonic()
+        for _ in range(len(self.pool.accounts)):
+            account = self.pool.get_next()
+            if account is None:
+                return None
+            if self._key_cooldowns.get(account.name, 0) <= now:
+                return account
+        return None
+
     async def _probe_cycle(self) -> None:
 
         now = time.monotonic()
@@ -340,7 +358,7 @@ class RateLimiterDaemon:
         account_by_model: dict[str, str] = {}
         if self.pool is not None:
             for model in active:
-                account = self.pool.get_next()
+                account = self._pick_account()
                 if account is None:
                     continue
                 account_by_model[model] = account.name
@@ -372,7 +390,10 @@ class RateLimiterDaemon:
                 name = account_by_model.get(r.model)
                 if name and self.pool is not None:
                     self.pool.mark_result(
-                        name, success=r.status == "available", latency_ms=r.latency_ms
+                        name,
+                        success=r.status == "available",
+                        latency_ms=r.latency_ms,
+                        error_type=r.error_type,
                     )
 
         limited = [r for r in results if r.status == "rate_limited"]
@@ -466,7 +487,19 @@ class RateLimiterDaemon:
             current = self.pool.get_current()
             name = account_name or (current.name if current is not None else None)
             if name is not None:
-                self.pool.mark_result(name, success=False, latency_ms=result.latency_ms)
+                self.pool.mark_result(
+                    name,
+                    success=False,
+                    latency_ms=result.latency_ms,
+                    error_type=result.error_type,
+                )
+            if result.error_type == "RateLimitError" and name is not None:
+                # Key-dimension limit: cool this account down for a minute
+                self._key_cooldowns[name] = time.monotonic() + 60
+                self.log.info(
+                    "Key cooldown armed",
+                    extra={"account": name, "seconds": 60, "error_type": result.error_type},
+                )
             if len(self.pool.accounts) > 1:
                 next_account = self.pool.get_next()
                 if next_account is not None:

@@ -24,7 +24,7 @@ from .paths import (
     get_opencode_config_dirs,
     get_opencode_version,
 )
-from .pool import Account, AccountPool
+from .pool import Account, AccountPool, build_auth_payload, credential_fingerprint
 from .prober import ModelProber
 from .service import (
     _default_config_path_str,
@@ -129,7 +129,12 @@ async def cmd_probe(config: Config, args: argparse.Namespace) -> int:
     for r in results:
         name = account_by_model.get(r.model)
         if name and pool is not None:
-            pool.mark_result(name, success=r.status == "available", latency_ms=r.latency_ms)
+            pool.mark_result(
+                name,
+                success=r.status == "available",
+                latency_ms=r.latency_ms,
+                error_type=r.error_type,
+            )
 
     if args.json:
         payload = [{**r.to_dict(), "account": account_by_model.get(r.model)} for r in results]
@@ -187,7 +192,8 @@ def _apply_account_auth(
         backup = target.with_suffix(".json.bak")
         shutil.copy(target, backup)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(auth, indent=2, ensure_ascii=False), encoding="utf-8")
+    payload = build_auth_payload(auth)
+    target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return "applied", str(target)
 
 
@@ -211,7 +217,8 @@ async def cmd_rotate(config: Config, args: argparse.Namespace) -> int:
         log.warning("Account pool returned no account despite non-empty pool")
         return 1
 
-    token = pool.resolve_token(next_account)
+    credential = pool.resolve_credential(next_account)
+    token = credential[1] if credential else None
     apply_status: str | None = None
     apply_target: str | None = None
     if args.apply:
@@ -242,6 +249,14 @@ async def cmd_rotate(config: Config, args: argparse.Namespace) -> int:
                     "strategy": args.strategy,
                     "accounts": [a.name for a in pool.accounts],
                     "auth_token_resolved": token is not None,
+                    "credential": (
+                        {
+                            "kind": credential[0],
+                            "fingerprint": credential_fingerprint(credential[1]),
+                        }
+                        if credential
+                        else None
+                    ),
                     "dry_run": bool(args.dry_run),
                     "applied": apply_status,
                     "auth_target": apply_target,
@@ -254,7 +269,10 @@ async def cmd_rotate(config: Config, args: argparse.Namespace) -> int:
         print(f"Rotated to account: {next_account.name}")
         print(f"Strategy: {args.strategy}")
         print(f"Available accounts: {', '.join(a.name for a in pool.accounts)}")
-        print(f"Auth token resolved: {'yes' if token else 'no'}")
+        if credential:
+            print(f"Credential: {credential[0]} ({credential_fingerprint(credential[1])})")
+        else:
+            print("Auth token resolved: no")
         if apply_status == "applied":
             print(f"Auth written to: {apply_target}")
         elif apply_status == "dry_run":
@@ -263,6 +281,18 @@ async def cmd_rotate(config: Config, args: argparse.Namespace) -> int:
             print("(dry run) Preview only - selection shown, nothing was changed")
 
     return 0
+
+
+def _account_credential_info(config: Config, account: Account) -> dict[str, str] | None:
+    """Resolve a single account's credential for display (kind + fingerprint)"""
+    pool = AccountPool(config.account_pool)
+    try:
+        cred = pool.resolve_credential(account)
+    except Exception:
+        return None
+    if not cred:
+        return None
+    return {"kind": cred[0], "fingerprint": credential_fingerprint(cred[1])}
 
 
 async def cmd_check(config: Config, args: argparse.Namespace) -> int:
@@ -284,7 +314,16 @@ async def cmd_check(config: Config, args: argparse.Namespace) -> int:
             "configured_accounts": len(config.account_pool.accounts),
             "strategy": config.account_pool.strategy,
             "accounts": [
-                {"name": a.name, "auth_path": a.auth_path, "env_var": a.env_var}
+                {
+                    "name": a.name,
+                    "auth_path": a.auth_path,
+                    "env_var": a.env_var,
+                    "credential": (
+                        _account_credential_info(config, a)
+                        if config.account_pool.accounts
+                        else None
+                    ),
+                }
                 for a in [Account(**acc) for acc in config.account_pool.accounts]
             ],
         },
@@ -345,6 +384,10 @@ async def cmd_check(config: Config, args: argparse.Namespace) -> int:
         f"  account pool     : {pool_info['configured_accounts']} account(s)"
         f" | strategy={pool_info['strategy']}"
     )
+    for acct in pool_info.get("accounts", []):
+        cred = acct.get("credential")
+        if cred:
+            print(f"    - {acct['name']}: {cred['kind']} ({cred['fingerprint']})")
     pool_health = pool_info.get("health")
     if pool_health:
         print("  account health   :")

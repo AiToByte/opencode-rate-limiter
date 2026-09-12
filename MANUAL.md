@@ -95,7 +95,7 @@ opencode-rate-limiter/
 | `config` | `FREE_MODELS`、`DaemonConfig`、`AccountPoolConfig`、`ProberConfig`、`HeadersConfig`、`CleanupConfig`、`Config` |
 | `headers` | `HeaderInjector` |
 | `prober` | `ProbeResult`、`ModelProber` |
-| `pool` | `AccountHealth`、`Account`、`extract_access_token`、`AccountPool` |
+| `pool` | `AccountHealth`、`Account`、`extract_credential`、`build_auth_payload`、`AccountPool` |
 | `cleanup` | `CleanupResult`、`CleanupManager` |
 | `logs` | `JSONFormatter`、`HumanFormatter`、`setup_logging`、`level_from_args` |
 | `parser` | `build_parser()`、`should_print_banner()`、结构化命令清单 |
@@ -178,18 +178,27 @@ opencode-rate-limiter/
 - 配置了账号池时，`probe` 与 daemon 的每个探测周期都会**按策略为每个模型选取一个账号**
   （`get_next()`），用 `resolve_token()` 从其 auth 来源解析 bearer token，成功则该模型的
   探测请求携带 `Authorization: Bearer <token>`；token 解析失败则回退为无鉴权头（原行为）。
-- 每个探测结果都会回写账号健康度（`mark_result`）：`available` 记成功，
-  `rate_limited` 经 `_handle_rate_limited` 记失败并触发轮换。`health` / `least_used`
+- 每个探测结果都会回写账号健康度（`mark_result`，R1 归因规则）：`available` 记
+  成功；`FreeUsageLimitError`（IP 配额）不计入凭证健康度；`RateLimitError`
+  （key RPM）记 key 维度失败并使该账号进入 60s key 冷却（冷却中不注入凭证，
+  全部冷却时回退匿名头）；其他失败照常记失败。`health` / `least_used`
   策略因此能基于真实请求结果演化。
 
 **AccountPool（账号池）**
-- 由 `[account_pool]` 下的 `accounts` 列表构造 `Account(name, auth_path, env_var, auth_json)`。
+- 由 `[account_pool]` 下的 `accounts` 列表构造 `Account(name, auth_path, env_var, auth_json[, kind])`；
+  `kind` 可显式指定凭证形态标签（默认从 auth 结构推断）。
 - 三种策略见 §5；健康度经 `mark_result()` 更新——`probe` 与 daemon 的探测结果都会回写
   （见上文「账号轮换与探测的结合」）；CLI `rotate` 只做选择，不写健康数据。
+  **归因规则（R1）**：`FreeUsageLimitError`（IP 配额）不计入凭证健康度；
+  `RateLimitError`（key RPM）记为 key 维度失败（`key_limited_count`）。
 - `read_auth()` 按 `auth_json` > `env_var` > `auth_path` 的优先级读取 auth JSON
   （`auth_path` 仅做 `~` 展开），任何一步解析失败返回 `None`。
-- `resolve_token(account)` = `read_auth` + `extract_access_token`（支持顶层或一层嵌套的
-  `access_token` 字段），返回 bearer token 或 `None`。
+- `resolve_credential(account)` = `read_auth` + `extract_credential`，返回
+  `(kind, token)`：kind 为 `oauth`（顶层/一层嵌套的 `access`/`access_token`）或
+  `api`（`{"type":"api","key"}`、provider 键控或裸 key 形态）；`resolve_token`
+  为其只取 token 的兼容别名。
+- `credential_fingerprint(token)`：前 6 后 4 的脱敏展示形式；`rotate`/`check`/
+  诊断的凭证信息一律以指纹输出，明文不出现在任何输出中。
 - **健康度滑动窗口**：每个账号记录最近 `[account_pool].health_window` 次（默认 100）
   探测结果，`success_rate` 优先取窗口内成功率，窗口为空时回退累计计数；延迟仍为
   指数移动平均（新结果权重 0.2）。
@@ -387,14 +396,19 @@ opencode-rate-limiter rotate [--strategy round_robin|least_used|health]
 | `--apply` | 关 | 把选中账号解析出的 auth JSON 写入活动的 OpenCode `auth.json`（先备份为 `auth.json.bak`） |
 
 - 行为：临时将 `config.account_pool.strategy` 设为 CLI 值，构造 `AccountPool`，调用
-  `get_next()` 选出「下一个」账号，并用 `resolve_token()` 解析其 bearer token。
-- **`--apply`**：把选中账号 `read_auth()` 得到的完整 auth JSON 写入目标 `auth.json`
+  `get_next()` 选出「下一个」账号，并用 `resolve_credential()` 解析其凭证
+  （kind + token）。
+- **`--apply`**：把选中账号的凭证**归一化**写入目标 `auth.json`
   （第一个已存在的候选 auth 文件，均不存在时创建第一个候选路径；已存在则先备份）。
-  账号无可解析 auth 时报错，退出码 `1`；与 `--dry-run` 组合只打印目标路径不写盘。
+  归一化规则（`build_auth_payload()`）：api key 写为
+  `{zen键: {type:"api", key}}`；单条 oauth / bare 载荷包裹为 provider 键控结构；
+  完整 provider 键控快照原样透传。
+  账号无可解析凭证时报错，退出码 `1`；与 `--dry-run` 组合只打印目标路径不写盘。
 - `--json` 输出：`{"rotated_to": name, "strategy": ..., "accounts": [...],
-  "auth_token_resolved": bool, "dry_run": bool, "applied": "applied"|"dry_run"|null,
-  "auth_target": path|null}`。
-- 人类可读输出会显示 `Auth token resolved: yes/no`。
+  "auth_token_resolved": bool, "credential": {"kind","fingerprint"}|null,
+  "dry_run": bool, "applied": "applied"|"dry_run"|null, "auth_target": path|null}`。
+- 人类可读输出显示凭证形态与指纹，如 `Credential: api (sk-abc…wxyz)`；无法解析时
+  显示 `Auth token resolved: no`。
 - `--dry-run`：输出带 `(dry run) Preview only` 标注（`rotate` 本身无副作用，预览与
   实际执行一致，但 dry-run 标记会体现在输出中）。
 - 没有配置账号时打印提示，退出码 `1`。
@@ -1043,8 +1057,8 @@ uv run mypy .
 1. **账号轮换默认不写盘**：`probe`/daemon 的探测按账号注入 `Authorization` 并回写健康度；
    `rotate` 默认只做选择与 token 解析校验，加 `--apply` 才会把账号 auth 写入
    OpenCode 的 `auth.json`（带备份），且不影响 OpenCode CLI 正在运行中的会话。
-2. **token 解析只认 `access_token` 字段**（顶层或一层嵌套）；OpenCode auth 结构变化时
-   需要扩展 `extract_access_token`。
+2. **凭证解析覆盖 oauth/api 双形态**（`access`/`access_token`/`key`，顶层或一层
+   嵌套）；OpenCode auth 结构再变化时需扩展 `extract_credential`。
 3. **头模板只支持 `{version}`** 一个占位符。
 4. **探测与真实用量共享每日 IP 配额**：网关按请求数（而非 token 数）对免费层计费，
    每次探测都计入同一 IP 的每日额度。默认 `daily_probe_budget=200` 硬上限 +

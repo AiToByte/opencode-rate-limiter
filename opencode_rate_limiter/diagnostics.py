@@ -26,7 +26,7 @@ import httpx
 from .config import Config
 from .headers import HeaderInjector
 from .paths import get_opencode_auth_files, get_opencode_version
-from .pool import extract_access_token
+from .pool import credential_fingerprint, extract_credential
 from .prober import ModelProber, ProbeResult, seconds_to_utc_midnight
 
 logger = logging.getLogger("diagnostics")
@@ -157,18 +157,36 @@ def _auth_shape(data: Any) -> tuple[str, bool]:
     if not isinstance(data, dict) or not data:
         return "empty", False
     if data.get("type") in ("oauth", "api", "wellknown"):
-        has = extract_access_token(data) is not None or bool(data.get("key"))
+        has = extract_credential(data) is not None
         return f"single-entry:{data.get('type')}", has
     shapes: set[str] = set()
     has_token = False
     for value in data.values():
         if isinstance(value, dict):
             shapes.add(str(value.get("type", "?")))
-            if extract_access_token(value) is not None or bool(value.get("key")):
+            if extract_credential(value) is not None:
                 has_token = True
     if shapes:
         return f"provider-keyed:{','.join(sorted(shapes))}", has_token
     return "unknown", False
+
+
+def _credential_summaries(data: Any) -> list[dict[str, str]]:
+    """Fingerprint credentials found in an auth payload (never the values)"""
+    summaries: list[dict[str, str]] = []
+    if isinstance(data, dict):
+        top = extract_credential(data)
+        if top:
+            summaries.append({"kind": top[0], "fingerprint": credential_fingerprint(top[1])})
+            return summaries
+        for value in data.values():
+            if isinstance(value, dict):
+                cred = extract_credential(value)
+                if cred:
+                    summaries.append(
+                        {"kind": cred[0], "fingerprint": credential_fingerprint(cred[1])}
+                    )
+    return summaries
 
 
 def inspect_auth_files() -> list[dict[str, Any]]:
@@ -180,11 +198,13 @@ def inspect_auth_files() -> list[dict[str, Any]]:
             "exists": path.exists(),
             "shape": None,
             "has_token": False,
+            "credentials": [],
         }
         if path.exists():
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 entry["shape"], entry["has_token"] = _auth_shape(data)
+                entry["credentials"] = _credential_summaries(data)
             except Exception as e:
                 entry["shape"] = f"unreadable ({type(e).__name__})"
         entries.append(entry)

@@ -129,7 +129,9 @@ opencode-rate-limiter diagnose
 
 3. 让健康度参与决策：跑 `probe`/`daemon` 后，探测结果会回写各账号的健康度
    （成功率/延迟/近期错误，近 100 次滑动窗口），`health` 策略据此择优。
-   `check` 可查看各账号健康快照。
+   `check` 可查看各账号健康快照（凭证以指纹展示，如 `api (sk-abc…wxyz)`）。
+   限流归因（R1）：key 的 `RateLimitError` 计入该账号并触发 60s 冷却；
+   免费层的 `FreeUsageLimitError` 属 IP 配额，不计入任何账号。
 
 > 免费模型匿名可用且按 IP 限额——账号池在免费场景下不增加额度（`diagnose`
 > 遇到 `FreeUsageLimitError` 时会再次提醒）。它的价值在付费 key 维度。

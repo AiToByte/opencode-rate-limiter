@@ -9,6 +9,22 @@ All notable changes to opencode-rate-limiter will be documented in this file.
 
 ### Added
 
+- **R1 — 付费 key / BYOK 轮换强化**：
+  - `extract_credential()` 凭证抽象：oauth（`access`/`access_token`）与 api
+    （`{"type":"api","key"}`，含 provider 键控与裸 key 形态）双形态识别；
+    `resolve_credential()` 支持配置 `kind` 显式覆盖；`extract_access_token`
+    保留为 kind 无关别名。
+  - **限流归因**：`mark_result(error_type=...)` —— `FreeUsageLimitError`（IP 配额）
+    不计入凭证健康度；`RateLimitError`（key RPM）记为 key 维度失败（新字段
+    `key_limited_count`），并使 daemon 对该账号布防 60s key 冷却（冷却中的账号
+    跳过注入，全部冷却时回退匿名头）。
+  - `rotate --apply` 写回形态归一化（`build_auth_payload()`）：api →
+    `{zen键: {type:api, key}}`；单条 oauth / bare 载荷包裹为 provider 键控结构；
+    完整快照透传。
+  - **凭证指纹脱敏**：`credential_fingerprint()`（前 6 后 4），`rotate`（JSON
+    `credential` 字段与人读输出）、`check`（账号明细）、诊断 auth 盘点统一展示，
+    明文绝不出现（有测试守护）。
+
 - **`diagnose` 限额诊断子命令**：一次诊断 = 环境检出 + 出口 IP 核实（多回显服务回退 +
   `ipaddress` 校验 + ipinfo 归属 enrich，全程超时降级）+ 单次探测（仅 1 次配额）+
   429 错误层级判定 + 分项发现（severity/title/detail/remedy）与人读报告。

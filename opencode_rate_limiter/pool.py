@@ -30,6 +30,7 @@ class AccountHealth:
     last_error_time: float = 0.0
     last_success_time: float = 0.0
     consecutive_failures: int = 0
+    key_limited_count: int = 0
     window: int = 100
     results: deque[bool] = field(default_factory=lambda: deque(maxlen=100))
 
@@ -78,24 +79,21 @@ class AccountHealth:
 
 @dataclass
 class Account:
-    """Account definition from config"""
+    """Account definition from config
+
+    `kind` is an optional override for the credential kind label
+    ("oauth" | "api"); by default the kind is inferred from the auth payload.
+    """
 
     name: str
     auth_path: str | None = None
     env_var: str | None = None
     auth_json: str | None = None
+    kind: str | None = None
 
 
-def extract_access_token(auth: dict[str, Any]) -> str | None:
-    """Extract a bearer token from an auth JSON structure
-
-    Recognized shapes:
-    - ``{"access_token": "..."}`` (generic)
-    - ``{"access": "..."}`` (opencode OAuth entry: ``{"type": "oauth", ...}``)
-    - provider-keyed maps, one level deep:
-      ``{"https://opencode.ai/zen": {"type": "oauth", "access": "..."}}``
-      or ``{"opencode": {"access_token": "..."}}``
-    """
+def _find_oauth_token(auth: dict[str, Any]) -> str | None:
+    """Find an OAuth access token (top level or one nested level deep)"""
     for key in ("access_token", "access"):
         token = auth.get(key)
         if isinstance(token, str) and token:
@@ -107,6 +105,79 @@ def extract_access_token(auth: dict[str, Any]) -> str | None:
                 if isinstance(nested, str) and nested:
                     return nested
     return None
+
+
+def _find_api_key(auth: dict[str, Any]) -> str | None:
+    """Find an API key (``{"type": "api", "key": ...}``, top level or nested;
+    a bare top-level ``{"key": ...}`` is also accepted)"""
+    raw_key = auth.get("key")
+    if auth.get("type") == "api" and isinstance(raw_key, str):
+        return raw_key
+    if auth.get("type") is None and isinstance(raw_key, str):
+        return raw_key
+    for value in auth.values():
+        if not isinstance(value, dict):
+            continue
+        nested_key = value.get("key")
+        if value.get("type") == "api" and isinstance(nested_key, str):
+            return nested_key
+    return None
+
+
+def extract_credential(auth: Any) -> tuple[str, str] | None:
+    """Classify an auth payload into ``(kind, token)``
+
+    kind is ``"api"`` when an API key is present (the keyRateLimiter
+    dimension), ``"oauth"`` for OAuth access tokens, or None when neither
+    shape matches. See extract_access_token for the recognized shapes.
+    """
+    if not isinstance(auth, dict):
+        return None
+    api_key = _find_api_key(auth)
+    if api_key:
+        return ("api", api_key)
+    oauth = _find_oauth_token(auth)
+    if oauth:
+        return ("oauth", oauth)
+    return None
+
+
+def extract_access_token(auth: dict[str, Any]) -> str | None:
+    """OAuth-compat alias: extract just the access token (kind-agnostic)"""
+    credential = extract_credential(auth)
+    return credential[1] if credential else None
+
+
+def credential_fingerprint(token: str) -> str:
+    """Redacted display form: first 6 + last 4 characters (never the full value)"""
+    if len(token) <= 12:
+        return "…" + token[-2:] if len(token) > 2 else "…"
+    return f"{token[:6]}…{token[-4:]}"
+
+
+ZEN_PROVIDER_KEY = "https://opencode.ai/zen"
+
+
+def build_auth_payload(auth: dict[str, Any]) -> dict[str, Any]:
+    """Normalize an auth payload into opencode's provider-keyed auth.json shape
+
+    - provider-keyed snapshots pass through unchanged
+    - single entries ({type: oauth|api, ...}) are wrapped under the Zen key
+    - bare token payloads ({"access": ...} / {"key": ...}) are re-typed
+    """
+    is_provider_keyed = (
+        bool(auth) and auth.get("type") is None and all(isinstance(v, dict) for v in auth.values())
+    )
+    if is_provider_keyed:
+        return auth
+    credential = extract_credential(auth)
+    if credential and credential[0] == "api":
+        return {ZEN_PROVIDER_KEY: {"type": "api", "key": credential[1]}}
+    if auth.get("type") in ("oauth", "api", "wellknown"):
+        return {ZEN_PROVIDER_KEY: auth}
+    if credential:
+        return {ZEN_PROVIDER_KEY: {"type": "oauth", "access": credential[1]}}
+    return auth
 
 
 class AccountPool:
@@ -149,11 +220,28 @@ class AccountPool:
             key=lambda a: self.health[a.name].calculate_score(self.config.score_weights),
         )
 
-    def mark_result(self, name: str, success: bool, latency_ms: float = 0.0) -> None:
-        """Record probe result for health tracking"""
+    def mark_result(
+        self,
+        name: str,
+        success: bool,
+        latency_ms: float = 0.0,
+        error_type: str | None = None,
+    ) -> None:
+        """Record probe result for health tracking
+
+        Attribution rules: a ``FreeUsageLimitError`` is an IP-level failure and
+        is NOT counted against the credential; a ``RateLimitError`` counts as a
+        key-dimension failure (``key_limited_count``).
+        """
 
         h = self.health.get(name)
         if not h:
+            return
+
+        if not success and error_type == "FreeUsageLimitError":
+            self.log.debug(
+                "Skipping health mark for %s: IP-level limit, not a credential failure", name
+            )
             return
 
         h.total_count += 1
@@ -172,6 +260,8 @@ class AccountPool:
         else:
             h.consecutive_failures += 1
             h.last_error_time = now
+            if error_type == "RateLimitError":
+                h.key_limited_count += 1
 
     def read_auth(self, account: Account) -> dict[str, Any] | None:
         """Read auth data from account source"""
@@ -202,12 +292,23 @@ class AccountPool:
 
         return None
 
-    def resolve_token(self, account: Account) -> str | None:
-        """Read auth data for the account and extract a bearer token"""
+    def resolve_credential(self, account: Account) -> tuple[str, str] | None:
+        """Read auth data and classify it as (kind, token)
+
+        An explicit ``account.kind`` overrides the inferred kind label.
+        """
         auth = self.read_auth(account)
         if not auth:
             return None
-        return extract_access_token(auth)
+        credential = extract_credential(auth)
+        if credential and account.kind and credential[0] != account.kind:
+            return (account.kind, credential[1])
+        return credential
+
+    def resolve_token(self, account: Account) -> str | None:
+        """Compat alias: extract just the bearer token"""
+        credential = self.resolve_credential(account)
+        return credential[1] if credential else None
 
     def get_current(self) -> Account | None:
         """Get current active account"""

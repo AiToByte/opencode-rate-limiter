@@ -14,6 +14,7 @@ from opencode_rate_limiter import (
     ModelProber,
     ProbeResult,
     extract_access_token,
+    extract_credential,
 )
 
 # =============================================================================
@@ -428,5 +429,92 @@ class TestExtractAccessTokenRealAuth:
     def test_generic_access_token_still_supported(self):
         assert extract_access_token({"access_token": "tok"}) == "tok"
 
-    def test_no_token(self):
-        assert extract_access_token({"type": "api", "key": "k"}) is None
+    def test_api_key_resolves_via_compat_alias(self):
+        """extract_access_token 现为 kind 无关别名：api key 也能取出"""
+        assert extract_access_token({"type": "api", "key": "k"}) == "k"
+
+
+class TestExtractCredential:
+    """R1: oauth/api 双形态凭证抽象"""
+
+    def test_api_typed_entry(self):
+        assert extract_credential({"type": "api", "key": "sk-1"}) == ("api", "sk-1")
+
+    def test_api_provider_keyed(self):
+        auth = {"https://opencode.ai/zen": {"type": "api", "key": "sk-2"}}
+        assert extract_credential(auth) == ("api", "sk-2")
+
+    def test_bare_key(self):
+        assert extract_credential({"key": "sk-3"}) == ("api", "sk-3")
+
+    def test_oauth_entry(self):
+        auth = {"type": "oauth", "access": "tok", "refresh": "r", "expires": 1}
+        assert extract_credential(auth) == ("oauth", "tok")
+
+    def test_api_takes_precedence_over_nested_oauth(self):
+        auth = {
+            "type": "api",
+            "key": "sk",
+            "other": {"access": "tok"},
+        }
+        assert extract_credential(auth) == ("api", "sk")
+
+    def test_none(self):
+        assert extract_credential({"foo": 1}) is None
+        assert extract_credential("not-a-dict") is None
+
+    def test_fingerprint_redacts(self):
+        from opencode_rate_limiter import credential_fingerprint
+
+        fp = credential_fingerprint("sk-abcdef1234567890wxyz")
+        assert fp == "sk-abc…wxyz"
+        assert "sk-abcdef1234567890wxyz" not in fp
+        assert credential_fingerprint("short") == "…rt"
+
+    def test_resolve_credential_kind_override(self, tmp_path):
+        f = tmp_path / "a.json"
+        f.write_text('{"type": "oauth", "access": "tok"}')
+        config = AccountPoolConfig(accounts=[{"name": "a", "auth_path": str(f)}])
+        pool = AccountPool(config)
+        pool.accounts[0].kind = "api"  # 显式覆盖 kind 标签
+        cred = pool.resolve_credential(pool.accounts[0])
+        assert cred is not None
+        assert cred == ("api", "tok")
+
+
+class TestMarkResultAttribution:
+    """R1: 限流归因——IP 配额失败不污染凭证健康度"""
+
+    def _pool(self) -> AccountPool:
+        return AccountPool(
+            AccountPoolConfig(accounts=[{"name": "a", "auth_json": "{}"}], strategy="health")
+        )
+
+    def test_free_usage_limit_not_attributed(self):
+        pool = self._pool()
+        pool.mark_result("a", success=False, error_type="FreeUsageLimitError")
+        h = pool.health["a"]
+        assert h.total_count == 0
+        assert h.consecutive_failures == 0
+        assert len(h.results) == 0
+
+    def test_rate_limit_error_counts_as_key_failure(self):
+        pool = self._pool()
+        pool.mark_result("a", success=False, error_type="RateLimitError")
+        h = pool.health["a"]
+        assert h.total_count == 1
+        assert h.consecutive_failures == 1
+        assert h.key_limited_count == 1
+
+    def test_generic_failure_still_counts(self):
+        pool = self._pool()
+        pool.mark_result("a", success=False, error_type="server_error")
+        h = pool.health["a"]
+        assert h.total_count == 1
+        assert h.consecutive_failures == 1
+        assert h.key_limited_count == 0
+
+    def test_success_unaffected(self):
+        pool = self._pool()
+        pool.mark_result("a", success=True, latency_ms=10)
+        assert pool.health["a"].success_count == 1

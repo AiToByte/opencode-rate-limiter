@@ -55,7 +55,15 @@ from .paths import (
     get_opencode_native_state_files,
     get_opencode_version,
 )
-from .pool import Account, AccountHealth, AccountPool, extract_access_token
+from .pool import (
+    Account,
+    AccountHealth,
+    AccountPool,
+    build_auth_payload,
+    credential_fingerprint,
+    extract_access_token,
+    extract_credential,
+)
 from .prober import ModelProber, ProbeResult
 from .service import (
     generate_launchd_plist,
@@ -92,6 +100,7 @@ __all__ = [
     "__version__",
     "_completion_payload",
     "_pid_alive",
+    "build_auth_payload",
     "build_parser",
     "cleanup",
     "cli",
@@ -110,8 +119,10 @@ __all__ = [
     "cmd_rotate",
     "completions",
     "config",
+    "credential_fingerprint",
     "daemon",
     "extract_access_token",
+    "extract_credential",
     "files",
     "format_report",
     "generate_completions",

@@ -138,10 +138,20 @@
 - 健康评分（权重可配 `[account_pool].score_weights`，默认 成功 0.5/延迟 0.3/新旧 0.2）：
   成功率来自**滑动窗口**（默认近 100 次结果）+ 延迟 EMA + 错误新旧。
   探测/daemon 的结果会回写，策略随真实表现演化。
-- `rotate --apply`：把选中账号解析出的完整 auth JSON 写入活动 auth.json
-  （先备份 `.json.bak`）；`--dry-run` 只预览目标。账号无可解析凭证时报错（退出码 1）。
-- `rotate` 输出包含 `auth_token_resolved`——token 解析支持 opencode 真实 auth 结构
-  （`{type:"oauth", access}` 与 provider 键控 map）。
+- **双凭证形态**（R1）：oauth（`access`/`access_token`）与 api key
+  （`{"type":"api","key"}`，含 provider 键控与裸 key 形态）均可解析与注入；
+  `check`/`rotate` 以**指纹**（前 6 后 4，如 `sk-abc…wxyz`）展示凭证，明文绝不输出。
+- **限流归因**（R1）：`RateLimitError`（key RPM）计入该账号的 key 维度失败计数
+  （`key_limited_count`）并触发 60s key 冷却——冷却中的账号不再注入凭证，
+  全部冷却时回退匿名头；`FreeUsageLimitError`（IP 配额）**不**计入凭证健康度，
+  因为那是 IP 的责任而非凭证的。
+- `rotate --apply`：把选中账号的凭证**归一化**写入活动 auth.json（`build_auth_payload()`）：
+  api key 写为 `{zen键: {type:api, key}}`，单条 oauth / bare 载荷包裹为 provider
+  键控结构，完整快照原样透传；先备份 `.json.bak`；`--dry-run` 只预览目标。
+  账号无可解析凭证时报错（退出码 1）。
+- `rotate` 输出包含 `auth_token_resolved` 与 `credential`（kind + 指纹）——
+  token 解析支持 opencode 真实 auth 结构（`{type:"oauth", access}`、
+  `{type:"api", key}` 与 provider 键控 map）。
 
 **能力边界（重要）**：免费模型配额键是 IP，**同 IP 换账号不增加额度**；账号池的
 真实收益在付费 key 维度（每 key 独立 1000 RPM）。诊断命令会在遇到
