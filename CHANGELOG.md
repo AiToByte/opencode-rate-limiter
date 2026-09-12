@@ -7,6 +7,10 @@ All notable changes to opencode-rate-limiter will be documented in this file.
 
 ## [Unreleased]
 
+（暂无）
+
+## [0.3.0] - 2026-09-12
+
 ### Added
 
 - **R1 — 付费 key / BYOK 轮换强化**：

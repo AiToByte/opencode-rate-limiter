@@ -1,6 +1,6 @@
 # opencode-rate-limiter 技术实现细节文档
 
-版本：0.2.0（2026-09） · 配套：[architecture.md](architecture.md)（为什么） ·
+版本：0.3.0（2026-09） · 配套：[architecture.md](architecture.md)（为什么） ·
 本文讲"具体怎么实现的"，函数/字段名与当前代码一致。
 
 ---

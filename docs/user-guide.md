@@ -1,6 +1,6 @@
 # opencode-rate-limiter 使用手册
 
-版本：0.2.0（2026-09） · 场景驱动的操作手册。
+版本：0.3.0（2026-09） · 场景驱动的操作手册。
 命令参数的完整清单与配置字段表见 [MANUAL.md](../MANUAL.md)；功能背景见
 [features.md](features.md)；遇到问题想深挖原理见
 [implementation.md](implementation.md) 与 [architecture.md](architecture.md)。
@@ -267,4 +267,5 @@ CLI 显式给的 `--interval/--models` 覆盖在重载后依然保留。
 | [implementation.md](implementation.md) | 实现细节（配置合并/探测/daemon 流水/锁/诊断） |
 | [architecture.md](architecture.md) | 架构、数据流、设计决策与外部契约 |
 | [roadmap.md](roadmap.md) | 迭代路线图（R1–R5） |
+| [release.md](release.md) | 发布检查清单与流水线说明 |
 | [CHANGELOG.md](../CHANGELOG.md) | 变更记录 |

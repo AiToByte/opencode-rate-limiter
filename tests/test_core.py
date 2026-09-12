@@ -460,7 +460,7 @@ class TestCLI:
 
     def test_version_output(self):
         """Version string is valid"""
-        assert __version__ == "0.2.0"
+        assert __version__ == "0.3.0"
 
     def test_parser_has_all_subcommands(self):
         """All subcommands registered"""

@@ -37,3 +37,24 @@ def test_build_script_uses_package_entry() -> None:
     assert "opencode_rate_limiter.py" not in source
     assert "_pyinstaller_entry" in source
     assert "--paths" in source.replace(" ", "")
+
+
+def test_release_version_markers_agree() -> None:
+    """三处版本号（meta/pyproject/man）一致（scripts/check_version.py 的测试化）"""
+    import re
+    import tomllib
+
+    root = BINARY_PATH.parent.parent
+    meta = re.search(
+        r'__version__\s*=\s*"([^"]+)"',
+        (root / "opencode_rate_limiter" / "meta.py").read_text(encoding="utf-8"),
+    )
+    assert meta is not None
+    with open(root / "pyproject.toml", "rb") as f:
+        pyproject = tomllib.load(f)["project"]["version"]
+    man = re.search(
+        r"opencode-rate-limiter\s+(\d+\.\d+\.\d+)",
+        (root / "man" / "opencode-rate-limiter.1").read_text(encoding="utf-8"),
+    )
+    assert man is not None
+    assert meta.group(1) == pyproject == man.group(1)

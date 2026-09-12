@@ -4,11 +4,12 @@ OpenCode 免费模型限流缓解与账号池管理工具
 
 ## 状态
 
-**Phase 1-6 完成** - 剩余 Phase 7（发布）
+**v0.3.0** - Phase 1–7 全部完成（发布流程见 [docs/release.md](docs/release.md)，迭代计划见 [docs/roadmap.md](docs/roadmap.md)）
 
 > 文档：**[使用手册](docs/user-guide.md)** · [功能介绍](docs/features.md) ·
 > [技术架构](docs/architecture.md) · [实现细节](docs/implementation.md) ·
-> [路线图](docs/roadmap.md) · **[MANUAL.md](MANUAL.md)**（命令/配置权威参考）。
+> [路线图](docs/roadmap.md) · [发布流程](docs/release.md) ·
+> **[MANUAL.md](MANUAL.md)**（命令/配置权威参考）。
 
 ## 快速开始
 
@@ -97,7 +98,7 @@ python scripts/build_binary.py
 - [x] Phase 4: CLI 界面整合
 - [x] Phase 5: 文档与补全生成
 - [x] Phase 6: 测试与二进制打包
-- [ ] Phase 7: 发布（tag → CI 三平台产物；流程待重建）
+- [x] Phase 7: 发布（tag 驱动流水线，见 `docs/release.md`）
 
 ## 许可证
 
