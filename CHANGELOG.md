@@ -7,7 +7,23 @@ All notable changes to opencode-rate-limiter will be documented in this file.
 
 ## [Unreleased]
 
-### Added
+### Fixed
+
+- **PyInstaller 构建脚本适配包结构**：`scripts/build_binary.py` 仍指向已删除的单文件
+  `opencode_rate_limiter.py`，包化后构建直接失败（CI `build-binary` 作业同样会挂）。
+  现改为生成入口 shim（`build/_pyinstaller_entry.py`）+ `--paths 项目根`；
+  实测构建通过（13.0 MB），并以回归测试守住该入口约定。
+- **JSON 日志时间戳为真 UTC**：原实现用 `formatTime` 取本地时间却拼接 `Z` 后缀，
+  日志时间与实际相差时区偏移；现用 `record.created` + UTC 显式格式化，并剔除
+  `taskName` 等新增 stdlib 键（含测试）。
+
+### Changed
+
+- **代码审查清理**：`probe_all` 空模型列表提前返回（不再空建 AsyncClient）；
+  prober 的 httpx 类型从 `Any` 收紧为 `httpx.AsyncClient`（模块级导入）；
+  `cmd_probe` 以类型收窄移除 `type: ignore`；路径去重的三处相同循环提取为
+  `paths._dedupe`；daemon 内散落的 `import time`/`import signal` 收敛到模块级；
+  coverage 统计范围限定为包本身；删除游离的 `test_config.toml`。
 
 - **每模型限流冷却期**：模型探测到 429 后按 `Retry-After`（缺失用 60s 估算）进入冷却，
   冷却期内 daemon 跳过该模型的探测——不再对着已知限流的模型空烧配额；

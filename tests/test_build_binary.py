@@ -29,3 +29,11 @@ def test_binary_main_returns_int() -> None:
     module = _load_module()
     assert callable(module.main)
     assert callable(module.binary_base_name)
+
+
+def test_build_script_uses_package_entry() -> None:
+    """包化后构建脚本必须经由入口 shim，不能再指向已删除的单文件"""
+    source = BINARY_PATH.read_text(encoding="utf-8")
+    assert "opencode_rate_limiter.py" not in source
+    assert "_pyinstaller_entry" in source
+    assert "--paths" in source.replace(" ", "")

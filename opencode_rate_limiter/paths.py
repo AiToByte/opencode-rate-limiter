@@ -9,6 +9,17 @@ from pathlib import Path
 from platformdirs import user_config_dir, user_state_dir
 
 
+def _dedupe(items: list[Path]) -> list[Path]:
+    """Order-preserving de-duplication"""
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            unique.append(item)
+    return unique
+
+
 def get_opencode_config_dirs() -> list[Path]:
     """Get all possible OpenCode config directories (cross-platform)"""
     dirs = []
@@ -40,14 +51,7 @@ def get_opencode_config_dirs() -> list[Path]:
         xdg_state = os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
         dirs.append(Path(xdg_state) / "opencode")
 
-    # Deduplicate
-    seen = set()
-    unique = []
-    for d in dirs:
-        if d not in seen:
-            seen.add(d)
-            unique.append(d)
-    return unique
+    return _dedupe(dirs)
 
 
 def get_opencode_native_cache_dirs() -> list[Path]:

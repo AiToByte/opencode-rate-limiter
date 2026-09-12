@@ -16,6 +16,7 @@ except ImportError:
 from platformdirs import user_config_dir
 
 from .paths import (
+    _dedupe,
     get_opencode_native_cache_dirs,
     get_opencode_native_state_files,
 )
@@ -333,25 +334,13 @@ class Config:
         # Add OpenCode native cache directories
         dirs.extend(get_opencode_native_cache_dirs())
         # Deduplicate preserving order
-        seen = set()
-        unique = []
-        for d in dirs:
-            if d not in seen:
-                seen.add(d)
-                unique.append(d)
-        return unique
+        return _dedupe(dirs)
 
     def get_state_files(self) -> list[Path]:
         """Get expanded state files (includes OpenCode native paths)"""
         files = self._expanded_state_files.copy()
         files.extend(get_opencode_native_state_files())
-        seen = set()
-        unique = []
-        for f in files:
-            if f not in seen:
-                seen.add(f)
-                unique.append(f)
-        return unique
+        return _dedupe(files)
 
     def save(self, path: Path) -> None:
         """Save config to TOML file"""

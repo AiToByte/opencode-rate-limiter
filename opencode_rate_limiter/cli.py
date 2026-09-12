@@ -118,8 +118,8 @@ async def cmd_probe(config: Config, args: argparse.Namespace) -> int:
 
     for r in results:
         name = account_by_model.get(r.model)
-        if name:
-            pool.mark_result(name, success=r.status == "available", latency_ms=r.latency_ms)  # type: ignore[union-attr]
+        if name and pool is not None:
+            pool.mark_result(name, success=r.status == "available", latency_ms=r.latency_ms)
 
     if args.json:
         payload = [{**r.to_dict(), "account": account_by_model.get(r.model)} for r in results]

@@ -9,7 +9,9 @@ import datetime as _dt
 import json
 import logging
 import os
+import signal
 import sys
+import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -58,7 +60,6 @@ class DaemonStatus:
     history: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=20))
 
     def to_dict(self) -> dict[str, Any]:
-        import time
 
         uptime = 0
         if self.running and self.started_at:
@@ -184,7 +185,6 @@ class RateLimiterDaemon:
             self.status.history = deque(self.status.history, maxlen=size)
 
     async def run(self) -> None:
-        import time
 
         self._acquire_lock()
         self._install_signal_handlers()
@@ -276,7 +276,6 @@ class RateLimiterDaemon:
             self._probe_event.clear()
 
     async def _probe_cycle(self) -> None:
-        import time
 
         now = time.monotonic()
         models = self._effective_models()
@@ -404,8 +403,6 @@ class RateLimiterDaemon:
         """Write the current status snapshot to the state file"""
         data = self.status.to_dict()
         if self._cooldowns:
-            import time
-
             now = time.monotonic()
             data["cooldowns"] = {
                 m: round(until - now) for m, until in sorted(self._cooldowns.items()) if until > now
@@ -449,7 +446,6 @@ class RateLimiterDaemon:
         # _probe_cycle), not once per rate-limited model.
 
     def _install_signal_handlers(self) -> None:
-        import signal
 
         loop = asyncio.get_running_loop()
         mapping: dict[str, Callable[[], None]] = {
@@ -474,7 +470,6 @@ class RateLimiterDaemon:
                 self.log.debug("Signal handler install skipped for %s", name)
 
     def _restore_signal_handlers(self) -> None:
-        import signal
 
         for sig_int in self._signal_fallback_sigs:
             previous = self._prev_handlers.get(sig_int)

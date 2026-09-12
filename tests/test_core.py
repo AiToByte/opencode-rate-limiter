@@ -1,8 +1,10 @@
 """Core module tests for opencode-rate-limiter Phase 1."""
 
 import argparse
+import datetime
 import json
 import logging
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -361,6 +363,29 @@ class TestLogging:
         assert data["level"] == "INFO"
         assert data["logger"] == "test_json"
         assert data["message"] == "Test message"
+        # 时间戳为真 UTC（Z 后缀且可解析回 UTC 时刻）
+        ts = datetime.datetime.fromisoformat(data["timestamp"].replace("Z", "+00:00"))
+        assert ts.tzinfo is not None
+        assert abs(ts.timestamp() - time.time()) < 60
+
+    def test_json_formatter_extra_fields(self, capsys):
+        """extra 字段透传进 JSON 且不含 stdlib 内部键"""
+        import logging
+
+        handler = logging.StreamHandler()
+        handler.setFormatter(JSONFormatter())
+        logger = logging.getLogger("test_json_extra")
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+
+        logger.info("with extra", extra={"model": "m1", "status": "available"})
+        logger.removeHandler(handler)
+
+        data = json.loads(capsys.readouterr().err)
+        assert data["model"] == "m1"
+        assert data["status"] == "available"
+        assert "created" not in data
+        assert "thread" not in data
 
     def test_human_formatter(self, capsys):
         """Human formatter produces readable output"""

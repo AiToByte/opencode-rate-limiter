@@ -101,8 +101,6 @@ class CleanupManager:
             try:
                 # Backup
                 backup_path = auth_file.with_suffix(".json.bak")
-                import shutil
-
                 shutil.copy(auth_file, backup_path)
                 result.details.append(f"Backed up to {backup_path.name}")
 

@@ -116,8 +116,7 @@ python_functions = ["test_*"]
 addopts = "-v --tb=short --strict-markers"
 
 [tool.coverage.run]
-source = ["."]
-omit = ["tests/*", "scripts/*", "*.pyi"]
+source = ["opencode_rate_limiter"]
 
 [tool.coverage.report]
 exclude_lines = [

@@ -867,7 +867,9 @@ python scripts/build_binary.py
 
 行为（`scripts/build_binary.py`）：
 - 产物输出 `dist/opencode-rate-limiter-<platform>-<arch>[.exe]`，先清空 `dist/`。
-- 单文件（`--onefile`），自动带上 `httpx`、`platformdirs`、`tomli_w`（实测 30.6 MB）。
+- 单文件（`--onefile`），自动带上 `httpx`、`platformdirs`、`tomli_w`（实测 13.0 MB）。
+- 入口经由自动生成的 shim（`build/_pyinstaller_entry.py`）：包内相对导入无法直接作为
+  PyInstaller 入口，脚本以 `--paths <项目根>` 保证包可被解析。
 - `--strip` 仅非 Windows 启用；`--uac-admin` / `--icon` 不启用。
 - macOS 附带 `com.opencode.ratelimiter` bundle identifier。
 - 输出不使用非 ASCII 符号（控制台为 GBK 等编码时避免 UnicodeEncodeError）。

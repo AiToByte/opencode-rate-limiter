@@ -4,17 +4,47 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime
 import json
 import logging
 import sys
 
+_STDLIB_LOG_KEYS = frozenset(
+    {
+        "name",
+        "msg",
+        "args",
+        "created",
+        "filename",
+        "funcName",
+        "levelname",
+        "levelno",
+        "lineno",
+        "module",
+        "msecs",
+        "message",
+        "pathname",
+        "process",
+        "processName",
+        "relativeCreated",
+        "taskName",
+        "thread",
+        "threadName",
+        "exc_info",
+        "exc_text",
+        "stack_info",
+    }
+)
+
 
 class JSONFormatter(logging.Formatter):
-    """JSON Lines log formatter"""
+    """JSON Lines log formatter (UTC timestamps, ISO-8601 with Z suffix)"""
 
     def format(self, record: logging.LogRecord) -> str:
         log_data = {
-            "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S") + "Z",
+            "timestamp": datetime.datetime.fromtimestamp(record.created, tz=datetime.UTC)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z"),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -25,29 +55,7 @@ class JSONFormatter(logging.Formatter):
 
         # Add extra fields
         for key, value in record.__dict__.items():
-            if key not in {
-                "name",
-                "msg",
-                "args",
-                "created",
-                "filename",
-                "funcName",
-                "levelname",
-                "levelno",
-                "lineno",
-                "module",
-                "msecs",
-                "message",
-                "pathname",
-                "process",
-                "processName",
-                "relativeCreated",
-                "thread",
-                "threadName",
-                "exc_info",
-                "exc_text",
-                "stack_info",
-            }:
+            if key not in _STDLIB_LOG_KEYS:
                 log_data[key] = value
 
         return json.dumps(log_data, ensure_ascii=False)

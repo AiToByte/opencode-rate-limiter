@@ -8,6 +8,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
+
 from .config import ProberConfig
 
 
@@ -50,12 +52,10 @@ class ModelProber:
         self.timeout = timeout
         self.config = config or ProberConfig()
         self.log = logging.getLogger("prober")
-        self._shared_client: Any | None = None  # httpx.AsyncClient when set
+        self._shared_client: httpx.AsyncClient | None = None
 
-    def _build_client(self) -> Any:
+    def _build_client(self) -> httpx.AsyncClient:
         """Create an httpx.AsyncClient honouring proxy / http2 / pool settings"""
-        import httpx
-
         kwargs: dict[str, Any] = {"timeout": self.timeout}
         if self.config.proxy:
             kwargs["proxy"] = self.config.proxy
@@ -78,10 +78,10 @@ class ModelProber:
         finally:
             await client.aclose()
 
-    async def _do_probe(self, model: str, headers: dict[str, str], client: Any) -> ProbeResult:
+    async def _do_probe(
+        self, model: str, headers: dict[str, str], client: httpx.AsyncClient
+    ) -> ProbeResult:
         import time
-
-        import httpx
 
         payload = {
             "model": model,
@@ -160,6 +160,9 @@ class ModelProber:
         pooled `AsyncClient`.
         """
         import asyncio
+
+        if not models:
+            return []
 
         overrides = headers_by_model or {}
         client = self._build_client()
