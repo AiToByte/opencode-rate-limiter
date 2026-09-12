@@ -43,6 +43,7 @@ from .daemon import (
     load_daemon_state,
     write_daemon_state,
 )
+from .diagnostics import Diagnosis, Finding, format_report, run_diagnostics
 from .headers import HeaderInjector
 from .logs import HumanFormatter, JSONFormatter, level_from_args, setup_logging
 from .meta import __version__
@@ -76,6 +77,8 @@ __all__ = [
     "DaemonConfig",
     "DaemonLockError",
     "DaemonStatus",
+    "Diagnosis",
+    "Finding",
     "HeaderInjector",
     "HeadersConfig",
     "HumanFormatter",
@@ -96,6 +99,7 @@ __all__ = [
     "cmd_completions",
     "cmd_daemon",
     "cmd_deep",
+    "cmd_diagnose",
     "cmd_generate_config",
     "cmd_generate_launchd",
     "cmd_generate_systemd",
@@ -109,6 +113,7 @@ __all__ = [
     "daemon",
     "extract_access_token",
     "files",
+    "format_report",
     "generate_completions",
     "generate_launchd_plist",
     "generate_systemd_unit",
@@ -127,6 +132,7 @@ __all__ = [
     "paths",
     "pool",
     "probe",
+    "run_diagnostics",
     "service",
     "setup_logging",
     "should_print_banner",

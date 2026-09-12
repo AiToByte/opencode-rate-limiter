@@ -10,6 +10,7 @@ from .meta import __version__
 _STRUCTURED_COMMANDS = frozenset(
     {
         "check",
+        "diagnose",
         "probe",
         "headers",
         "generate-systemd",
@@ -98,6 +99,9 @@ Examples:
     )
 
     add_sub("check", "健康检查聚合输出")
+
+    diag_p = add_sub("diagnose", "Zen 限额诊断（出口 IP / 代理 / 错误层级 / 建议）")
+    diag_p.add_argument("--model", help="探测的模型（默认取配置列表第一个；仅消耗 1 次配额）")
 
     daemon_p = add_sub("daemon", "后台守护进程模式")
     daemon_p.add_argument("--interval", type=int, default=None, help="探测间隔（秒，最小 5）")

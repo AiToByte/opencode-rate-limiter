@@ -9,6 +9,7 @@ _opencode_rate_limiter() {
         'completions:生成 shell 补全脚本 (bash/zsh/fish)'
         'daemon:后台守护进程模式'
         'deep:深度维护：quick + 清缓存'
+        'diagnose:Zen 限额诊断（出口 IP / 代理 / 错误层级 / 建议）'
         'generate-config:生成默认配置文件（已存在时需 --force 覆盖）'
         'generate-launchd:生成 launchd plist'
         'generate-systemd:生成 systemd 服务文件'
@@ -55,6 +56,7 @@ _opencode_rate_limiter() {
         '(-)'{${commands}} \
         '--strategy: :($strategies)'
         'daemon: :(--interval --models)'
+        'diagnose: :(--model)'
         'generate-config: :(--force)'
         'headers: :(--model --export)'
         'rotate: :(--strategy --apply)'

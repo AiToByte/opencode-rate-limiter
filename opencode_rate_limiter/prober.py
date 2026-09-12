@@ -24,6 +24,7 @@ class ProbeResult:
     estimated_reset: int | None = None
     latency_ms: float = 0.0
     error: str | None = None
+    error_type: str | None = None
     timestamp: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -35,6 +36,7 @@ class ProbeResult:
             "estimated_reset": self.estimated_reset,
             "latency_ms": round(self.latency_ms, 1),
             "error": self.error,
+            "error_type": self.error_type,
             "timestamp": self.timestamp,
         }
 
@@ -116,6 +118,7 @@ class ModelProber:
                     retry_after=retry_after_int,
                     estimated_reset=self._estimate_reset(retry_after_int),
                     latency_ms=latency,
+                    error_type=_parse_error_type(resp),
                     timestamp=timestamp,
                 )
             else:
@@ -125,6 +128,7 @@ class ModelProber:
                     http_status=resp.status_code,
                     latency_ms=latency,
                     error=f"HTTP {resp.status_code}",
+                    error_type=_parse_error_type(resp),
                     timestamp=timestamp,
                 )
 
@@ -184,6 +188,26 @@ class ModelProber:
         """
         if retry_after is not None:
             return retry_after
-        now = _dt.datetime.now(_dt.UTC)
-        midnight = (now + _dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        return max(1, int((midnight - now).total_seconds()))
+        return seconds_to_utc_midnight()
+
+
+def seconds_to_utc_midnight() -> int:
+    """Seconds until the next UTC midnight (the free-tier quota reset point)"""
+    now = _dt.datetime.now(_dt.UTC)
+    midnight = (now + _dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return max(1, int((midnight - now).total_seconds()))
+
+
+def _parse_error_type(resp: httpx.Response) -> str | None:
+    """Extract error.type from a Zen error body: {"error": {"type": ...}}"""
+    try:
+        body = resp.json()
+    except Exception:
+        return None
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            err_type = err.get("type")
+            if isinstance(err_type, str):
+                return err_type
+    return None

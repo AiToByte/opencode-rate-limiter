@@ -14,6 +14,7 @@ from .cleanup import CleanupManager, CleanupResult
 from .completions import generate_completions
 from .config import Config
 from .daemon import DaemonLockError, RateLimiterDaemon, load_daemon_state
+from .diagnostics import format_report, run_diagnostics
 from .headers import HeaderInjector
 from .logs import level_from_args, setup_logging
 from .meta import __version__
@@ -380,6 +381,15 @@ async def cmd_check(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_diagnose(config: Config, args: argparse.Namespace) -> int:
+    report = await run_diagnostics(config, model=args.model)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        print(format_report(report))
+    return report.exit_code
+
+
 async def cmd_daemon(config: Config, args: argparse.Namespace) -> int:
     log = logging.getLogger("cmd.daemon")
 
@@ -468,6 +478,7 @@ COMMAND_HANDLERS = {
     "headers": cmd_headers,
     "rotate": cmd_rotate,
     "check": cmd_check,
+    "diagnose": cmd_diagnose,
     "daemon": cmd_daemon,
     "generate-systemd": cmd_generate_systemd,
     "generate-launchd": cmd_generate_launchd,

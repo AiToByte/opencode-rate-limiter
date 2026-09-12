@@ -445,7 +445,46 @@ opencode-rate-limiter check [--json]
     再并上 OpenCode 原生路径，去重。
 - 退出码恒为 `0`（不是健康状态码，仅表示命令成功）。
 
-### 4.8 `daemon` —— 后台守护进程
+### 4.8 `diagnose` —— Zen 限额诊断
+
+```
+opencode-rate-limiter diagnose [--model MODEL] [--json]
+```
+
+一次诊断 = 环境检出 + 出口 IP 核实 + **单次探测**（仅消耗 1 次每日配额）+
+429 错误层级判定 + 分项发现与建议。产物为人读报告；`--json` 输出完整结构
+（`findings[]` 含 severity/title/detail/remedy）。
+
+诊断覆盖与判定：
+
+| 检查项 | 判定内容 |
+|--------|----------|
+| 出口 IP | 经 `HTTP(S)_PROXY` 实测出口（多个回显服务回退、`ipaddress` 校验），IPv6 给出 /64 前缀并提示聚合规则 |
+| 代理环境 | `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`；提醒终端 CLI 不读系统代理、NO_PROXY 可能绕过代理 |
+| 429 分层 | 解析响应体 `error.type`：`FreeUsageLimitError`（IP 日配额→附 UTC 午夜重置时刻、「换账号无效」说明）/ `RateLimitError`（key RPM）/ `server_error`（上游错误）/ `AuthError`、`RegionError` 等，各配专属解释与建议 |
+| 凭证盘点 | 各 auth.json 候选的存在性/结构（single-entry / provider-keyed）/ 是否含凭证——**绝不输出凭证内容** |
+| 网络 | 探测未达网关（超时/拒连）时给出代理链路排查建议 |
+
+退出码：`0` 健康；`1` 被限流；`2` 网络/网关错误（未达限流层）。
+
+典型输出（节选）：
+
+```
+-- 探测（1 次请求，计入每日配额）--
+  模型 deepseek-v4-flash-free: rate_limited (HTTP 429, 812ms)
+  error.type: FreeUsageLimitError
+-- 发现 --
+  [FAIL] 免费层每日配额用尽（按 IP 计数）
+         网关按出口 IP 统计每日请求数（UTC 午夜重置）。……
+  [WARN] 换账号对此无效
+         免费配额键是出口 IP（Redis 按 IP 计数），不是账号。……
+  [WARN] 确认出口 IP 与节点切换是否生效
+         ……
+         → 建议: 换不同地区/不同服务商的出口 IP，或等待重置。
+-- 结论: 被限流 --
+```
+
+### 4.9 `daemon` —— 后台守护进程
 
 ```
 opencode-rate-limiter daemon [--interval SECONDS] [--models CSV] [--json] [--dry-run]
@@ -461,7 +500,7 @@ opencode-rate-limiter daemon [--interval SECONDS] [--models CSV] [--json] [--dry
 `add_signal_handler` 不可用时的 `signal.signal` 兜底桥接处理 SIGINT/SIGTERM。
 启动时获取单实例锁（§6.4），已有存活实例时报错并以退出码 `1` 结束。
 
-### 4.9 `generate-systemd` —— 生成 systemd 用户服务
+### 4.10 `generate-systemd` —— 生成 systemd 用户服务
 
 ```
 opencode-rate-limiter generate-systemd
@@ -471,7 +510,7 @@ opencode-rate-limiter generate-systemd
 `Environment=OPENCODE_RATE_LIMITER_CONFIG=<平台配置目录>/config.toml`）。
 该环境变量由 `Config.load()` 读取（见 §5.1）。
 
-### 4.10 `generate-launchd` —— 生成 macOS launchd plist
+### 4.11 `generate-launchd` —— 生成 macOS launchd plist
 
 ```
 opencode-rate-limiter generate-launchd
@@ -481,7 +520,7 @@ opencode-rate-limiter generate-launchd
 日志 `/tmp/opencode-rate-limiter.log` / `.err.log`，同样的 `OPENCODE_RATE_LIMITER_CONFIG`
 环境变量（由程序读取，见 §5.1）。
 
-### 4.11 `generate-task` —— 生成 Windows 任务计划 XML
+### 4.12 `generate-task` —— 生成 Windows 任务计划 XML
 
 ```
 opencode-rate-limiter generate-task
@@ -490,7 +529,7 @@ opencode-rate-limiter generate-task
 输出 UTF-16 任务 XML：登录时触发，`LeastPrivilege` 权限，网络可用才运行，
 `MultipleInstancesPolicy=IgnoreNew`，命令为解析到的可执行文件 + 参数 `daemon`。
 
-### 4.12 `generate-config` —— 生成默认配置文件
+### 4.13 `generate-config` —— 生成默认配置文件
 
 ```
 opencode-rate-limiter generate-config [--force] [--config PATH] [--json]
@@ -508,7 +547,7 @@ opencode-rate-limiter generate-config [--force] [--config PATH] [--json]
 - 目标已存在且未给 `--force` 时报错，退出码 `1`；不覆盖现有文件。
 - 依赖可选依赖 `tomli-w`；缺失时报错退出码 `1`。
 
-### 4.13 `completions` —— 生成 shell 补全
+### 4.14 `completions` —— 生成 shell 补全
 
 ```
 opencode-rate-limiter completions bash|zsh|fish

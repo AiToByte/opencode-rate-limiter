@@ -19,6 +19,7 @@ ALL_COMMANDS = [
     "headers",
     "rotate",
     "check",
+    "diagnose",
     "daemon",
     "generate-systemd",
     "generate-launchd",

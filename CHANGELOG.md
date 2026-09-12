@@ -9,6 +9,16 @@ All notable changes to opencode-rate-limiter will be documented in this file.
 
 ### Added
 
+- **`diagnose` 限额诊断子命令**：一次诊断 = 环境检出 + 出口 IP 核实（多回显服务回退 +
+  `ipaddress` 校验 + ipinfo 归属 enrich，全程超时降级）+ 单次探测（仅 1 次配额）+
+  429 错误层级判定 + 分项发现（severity/title/detail/remedy）与人读报告。
+  针对 `FreeUsageLimitError` 自动输出「换账号无效」「出口 IP/节点切换核验」「IPv6 /64
+  聚合」「UTC 午夜重置时刻」等源码核实结论；区分「未达网关（网络/代理）」与「已达
+  网关（上游/配额）」。退出码 0/1/2 = 健康/被限流/网络错误。凭证内容绝不入报告。
+- **`ProbeResult.error_type`**：探测现在解析 Zen 错误体的 `error.type`
+  （`FreeUsageLimitError`/`RateLimitError`/`server_error` 等），JSON 输出与诊断共用。
+- **`seconds_to_utc_midnight()`**：独立于探测器的重置点计算，供冷却与诊断共用。
+
 - **每日探测预算**：`[daemon].daily_probe_budget`（默认 200 次/UTC 日，0 = 不限）——
   网关按请求数对免费层计 IP 配额，探测与真实用量共享额度；预算跨重启持久化，
   耗尽后跳过探测周期并在 `check` 中显示用量。
