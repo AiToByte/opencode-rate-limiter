@@ -34,6 +34,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+http2 = [
+    "h2>=4",
+]
 dev = [
     "pytest>=8.0",
     "pytest-mock>=3.12",

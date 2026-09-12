@@ -9,6 +9,22 @@ All notable changes to opencode-rate-limiter will be documented in this file.
 
 ### Added
 
+- **探测历史环形缓冲**：`[daemon].history_size`（默认 20）条最近探测摘要
+  （`{ts, models}`）随状态文件持久化；`check` 人读输出新增
+  `probe history` 趋势段（各模型近 N 轮的状态计数）。
+- **健康评分权重可配置**：`[account_pool].score_weights`
+  （默认 `success=0.5, latency=0.3, recency=0.2`），校验三键齐全、值域 [0,1]、
+  和为 1；`health` 策略与 `pool_health` 快照均使用配置权重。
+- **`[prober].http2` / `[prober].connection_pool_size`**：可选 HTTP/2（需安装
+  `h2`，新增 `http2` optional-dependency 组，缺失时告警回退）与共享连接池大小。
+
+### Changed
+
+- **探测共享 AsyncClient**：一轮 `probe_all` 复用同一个连接池化的
+  `httpx.AsyncClient`（此前每个探测各建一个客户端），降低每轮的连接握手开销；
+  单独 `probe()` 仍用一次性客户端，`_shared_client` 用后即清。
+- 偶发脆弱的并发计时测试放宽时间边界（sleep 0.05→0.2、断言 0.12s→0.35s）。
+
 - **`check` 人读输出**：默认输出摘要（版本、守护进程配置与运行时、账号池与健康度、
   最近探测结果、路径计数），`--json` 才输出完整 JSON 报告，`--json` 选项自此有意义。
 - **显式构建后端**：`pyproject.toml` 增加 hatchling `[build-system]` 与 wheel 打包配置，

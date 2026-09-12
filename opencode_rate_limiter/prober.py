@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import importlib.util
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -37,7 +38,11 @@ class ProbeResult:
 
 
 class ModelProber:
-    """Async HTTP probe for free model availability"""
+    """Async HTTP probe for free model availability
+
+    `probe_all()` shares one `httpx.AsyncClient` across the concurrent probes
+    (connection pooling); a standalone `probe()` uses a one-shot client.
+    """
 
     ZEN_ENDPOINT = "https://opencode.ai/zen/v1/chat/completions"
 
@@ -45,9 +50,35 @@ class ModelProber:
         self.timeout = timeout
         self.config = config or ProberConfig()
         self.log = logging.getLogger("prober")
+        self._shared_client: Any | None = None  # httpx.AsyncClient when set
+
+    def _build_client(self) -> Any:
+        """Create an httpx.AsyncClient honouring proxy / http2 / pool settings"""
+        import httpx
+
+        kwargs: dict[str, Any] = {"timeout": self.timeout}
+        if self.config.proxy:
+            kwargs["proxy"] = self.config.proxy
+        if self.config.http2:
+            if importlib.util.find_spec("h2") is not None:
+                kwargs["http2"] = True
+            else:
+                self.log.warning("prober.http2 requires the 'h2' package; falling back to HTTP/1.1")
+        size = self.config.connection_pool_size
+        kwargs["limits"] = httpx.Limits(max_connections=size, max_keepalive_connections=size)
+        return httpx.AsyncClient(**kwargs)
 
     async def probe(self, model: str, headers: dict[str, str]) -> ProbeResult:
         """Probe a single model and return availability status"""
+        if self._shared_client is not None:
+            return await self._do_probe(model, headers, self._shared_client)
+        client = self._build_client()
+        try:
+            return await self._do_probe(model, headers, client)
+        finally:
+            await client.aclose()
+
+    async def _do_probe(self, model: str, headers: dict[str, str], client: Any) -> ProbeResult:
         import time
 
         import httpx
@@ -59,49 +90,43 @@ class ModelProber:
             "temperature": 0,
         }
         request_headers = {**headers, **self.config.extra_headers}
-        client_kwargs: dict[str, Any] = {"timeout": self.timeout}
-        if self.config.proxy:
-            client_kwargs["proxy"] = self.config.proxy
 
         start = time.monotonic()
         timestamp = _dt.datetime.now(_dt.UTC).isoformat().replace("+00:00", "Z")
 
         try:
-            async with httpx.AsyncClient(**client_kwargs) as client:
-                resp = await client.post(
-                    self.config.endpoint, json=payload, headers=request_headers
-                )
-                latency = (time.monotonic() - start) * 1000
+            resp = await client.post(self.config.endpoint, json=payload, headers=request_headers)
+            latency = (time.monotonic() - start) * 1000
 
-                if resp.status_code == 200:
-                    return ProbeResult(
-                        model=model,
-                        status="available",
-                        http_status=200,
-                        latency_ms=latency,
-                        timestamp=timestamp,
-                    )
-                elif resp.status_code == 429:
-                    retry_after = resp.headers.get("Retry-After")
-                    retry_after_int = int(retry_after) if retry_after else None
-                    return ProbeResult(
-                        model=model,
-                        status="rate_limited",
-                        http_status=429,
-                        retry_after=retry_after_int,
-                        estimated_reset=self._estimate_reset(retry_after_int),
-                        latency_ms=latency,
-                        timestamp=timestamp,
-                    )
-                else:
-                    return ProbeResult(
-                        model=model,
-                        status="error",
-                        http_status=resp.status_code,
-                        latency_ms=latency,
-                        error=f"HTTP {resp.status_code}",
-                        timestamp=timestamp,
-                    )
+            if resp.status_code == 200:
+                return ProbeResult(
+                    model=model,
+                    status="available",
+                    http_status=200,
+                    latency_ms=latency,
+                    timestamp=timestamp,
+                )
+            elif resp.status_code == 429:
+                retry_after = resp.headers.get("Retry-After")
+                retry_after_int = int(retry_after) if retry_after else None
+                return ProbeResult(
+                    model=model,
+                    status="rate_limited",
+                    http_status=429,
+                    retry_after=retry_after_int,
+                    estimated_reset=self._estimate_reset(retry_after_int),
+                    latency_ms=latency,
+                    timestamp=timestamp,
+                )
+            else:
+                return ProbeResult(
+                    model=model,
+                    status="error",
+                    http_status=resp.status_code,
+                    latency_ms=latency,
+                    error=f"HTTP {resp.status_code}",
+                    timestamp=timestamp,
+                )
 
         except httpx.TimeoutException:
             latency = (time.monotonic() - start) * 1000
@@ -131,13 +156,20 @@ class ModelProber:
         """Probe multiple models concurrently
 
         `headers_by_model` optionally overrides the shared headers per model
-        (used for per-account Authorization injection).
+        (used for per-account Authorization injection). All probes share one
+        pooled `AsyncClient`.
         """
         import asyncio
 
         overrides = headers_by_model or {}
-        tasks = [self.probe(model, overrides.get(model, headers)) for model in models]
-        return await asyncio.gather(*tasks)
+        client = self._build_client()
+        self._shared_client = client
+        try:
+            tasks = [self.probe(model, overrides.get(model, headers)) for model in models]
+            return await asyncio.gather(*tasks)
+        finally:
+            self._shared_client = None
+            await client.aclose()
 
     @staticmethod
     def _estimate_reset(retry_after: int | None) -> int | None:

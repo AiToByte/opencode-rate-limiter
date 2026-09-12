@@ -38,6 +38,7 @@ class DaemonConfig:
     models: list[str] = field(default_factory=lambda: list(FREE_MODELS))
     probe_timeout_seconds: float = 10.0
     auto_cleanup_on_429: bool = True
+    history_size: int = 20
 
     def validate(self) -> None:
         if self.interval_seconds < 5:
@@ -46,6 +47,8 @@ class DaemonConfig:
             raise ValueError(f"probe_timeout_seconds must be > 0, got {self.probe_timeout_seconds}")
         if not self.models:
             raise ValueError("models list cannot be empty")
+        if self.history_size < 1:
+            raise ValueError(f"history_size must be >= 1, got {self.history_size}")
 
 
 @dataclass
@@ -53,6 +56,11 @@ class AccountPoolConfig:
     accounts: list[dict[str, Any]] = field(default_factory=list)
     strategy: Literal["round_robin", "least_used", "health"] = "health"
     health_window: int = 100
+    score_weights: dict[str, float] = field(
+        default_factory=lambda: {"success": 0.5, "latency": 0.3, "recency": 0.2}
+    )
+
+    _WEIGHT_KEYS = ("success", "latency", "recency")
 
     def validate(self) -> None:
         valid_strategies = {"round_robin", "least_used", "health"}
@@ -60,6 +68,17 @@ class AccountPoolConfig:
             raise ValueError(f"strategy must be one of {valid_strategies}, got {self.strategy}")
         if self.health_window < 1:
             raise ValueError(f"health_window must be >= 1, got {self.health_window}")
+        weights = self.score_weights
+        missing = [k for k in self._WEIGHT_KEYS if k not in weights]
+        if missing:
+            raise ValueError(f"score_weights missing keys: {missing}")
+        unknown = [k for k in weights if k not in self._WEIGHT_KEYS]
+        if unknown:
+            raise ValueError(f"score_weights has unknown keys: {unknown}")
+        if not all(0.0 <= float(v) <= 1.0 for v in weights.values()):
+            raise ValueError("score_weights values must be within [0.0, 1.0]")
+        if abs(sum(float(v) for v in weights.values()) - 1.0) > 0.001:
+            raise ValueError("score_weights must sum to 1.0")
         for i, acc in enumerate(self.accounts):
             if not isinstance(acc, dict):
                 raise ValueError(f"accounts[{i}] must be a dict")
@@ -82,12 +101,18 @@ class ProberConfig:
     max_tokens: int = 1
     extra_headers: dict[str, str] = field(default_factory=dict)
     proxy: str | None = None
+    http2: bool = False
+    connection_pool_size: int = 8
 
     def validate(self) -> None:
         if not self.endpoint.startswith(("http://", "https://")):
             raise ValueError(f"prober.endpoint must be an http(s) URL, got {self.endpoint}")
         if self.max_tokens < 1:
             raise ValueError(f"prober.max_tokens must be >= 1, got {self.max_tokens}")
+        if self.connection_pool_size < 1:
+            raise ValueError(
+                f"prober.connection_pool_size must be >= 1, got {self.connection_pool_size}"
+            )
 
 
 @dataclass
@@ -340,16 +365,21 @@ class Config:
                 "models": self.daemon.models,
                 "probe_timeout_seconds": self.daemon.probe_timeout_seconds,
                 "auto_cleanup_on_429": self.daemon.auto_cleanup_on_429,
+                "history_size": self.daemon.history_size,
             },
             "account_pool": {
                 "accounts": self.account_pool.accounts,
                 "strategy": self.account_pool.strategy,
+                "health_window": self.account_pool.health_window,
+                "score_weights": self.account_pool.score_weights,
             },
             "prober": {
                 "endpoint": self.prober.endpoint,
                 "ping_message": self.prober.ping_message,
                 "max_tokens": self.prober.max_tokens,
                 "extra_headers": self.prober.extra_headers,
+                "http2": self.prober.http2,
+                "connection_pool_size": self.prober.connection_pool_size,
                 # tomli_w cannot serialize None; omit proxy when unset
                 **({"proxy": self.prober.proxy} if self.prober.proxy else {}),
             },

@@ -166,7 +166,7 @@ class TestDaemonMode:
 
         async def fake_probe(model: str, headers: dict[str, str]) -> ProbeResult:
             log.append(("start", model))
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.2)
             log.append(("end", model))
             return ProbeResult(model=model, status="available", timestamp="t")
 
@@ -178,8 +178,9 @@ class TestDaemonMode:
 
         assert len(log) == 6
         assert {m for _, m in log} == {"m1", "m2", "m3"}
-        # 并行：总耗时 ≈ 一次 sleep (0.05s)；串行则需 3×0.05s
-        assert elapsed < 0.12
+        # 并行：总耗时 ≈ 一次 sleep (0.2s)；串行则需 3×0.2s
+        # 边界放宽到 0.35s 以容忍共享客户端构建与 CI 负载抖动
+        assert elapsed < 0.35
         assert set(daemon.status.model_results) == {"m1", "m2", "m3"}
 
     @pytest.mark.asyncio
@@ -623,3 +624,70 @@ class TestPoolHealthPersistence:
 
         assert daemon.pool is not None
         assert daemon.pool.health["a"].total_count == 1  # 健康度未归零
+
+
+class TestProbeHistory:
+    """探测历史环形缓冲测试"""
+
+    @pytest.mark.asyncio
+    async def test_history_recorded_and_persisted(self, tmp_path):
+        daemon = make_daemon(tmp_path, models=["m1"])
+
+        async def ok_probe(model: str, headers: dict[str, str]) -> ProbeResult:
+            return ProbeResult(model=model, status="available", latency_ms=10.0, timestamp="t")
+
+        daemon.prober.probe = ok_probe  # type: ignore[method-assign]
+        await daemon._probe_cycle()
+
+        assert len(daemon.status.history) == 1
+        entry = daemon.status.history[0]
+        assert entry["models"] == {"m1": "available"}
+        assert entry["ts"] != ""
+
+        data = json.loads((tmp_path / "daemon.json").read_text(encoding="utf-8"))
+        assert data["history"][0]["models"] == {"m1": "available"}
+
+    @pytest.mark.asyncio
+    async def test_history_respects_configured_size(self, tmp_path):
+        daemon = make_daemon(tmp_path, models=["m1"])
+        daemon.config.daemon.history_size = 2
+        daemon._rebuild()  # 应用新的窗口大小
+
+        async def ok_probe(model: str, headers: dict[str, str]) -> ProbeResult:
+            return ProbeResult(model=model, status="available", latency_ms=1.0, timestamp="t")
+
+        daemon.prober.probe = ok_probe  # type: ignore[method-assign]
+        for _ in range(4):
+            await daemon._probe_cycle()
+
+        assert daemon.status.history.maxlen == 2
+        assert len(daemon.status.history) == 2
+
+    @pytest.mark.asyncio
+    async def test_check_displays_history_trend(self, monkeypatch, capsys, tmp_path):
+        state_path = tmp_path / "daemon.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "running": False,
+                    "total_cycles": 3,
+                    "history": [
+                        {"ts": "t1", "models": {"m1": "available", "m2": "rate_limited"}},
+                        {"ts": "t2", "models": {"m1": "available", "m2": "available"}},
+                        {"ts": "t3", "models": {"m1": "error", "m2": "available"}},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "opencode_rate_limiter.daemon.get_daemon_state_path", lambda: state_path
+        )
+
+        rc = await cmd_check(Config(), argparse.Namespace(json=False))
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert "probe history    : last 3 probes" in out
+        assert "m1: available x2, error x1" in out
+        assert "m2: available x2, rate_limited x1" in out

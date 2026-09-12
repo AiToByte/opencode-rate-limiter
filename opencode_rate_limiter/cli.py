@@ -337,6 +337,18 @@ async def cmd_check(config: Config, args: argparse.Namespace) -> int:
         for name, r in sorted(results.items()):
             retry = f", retry_after={r['retry_after']}s" if r.get("retry_after") else ""
             print(f"    [{r['status']}] {name} ({r['latency_ms']}ms{retry})")
+    history = daemon_info.get("history")
+    if isinstance(history, list) and history:
+        tally: dict[str, dict[str, int]] = {}
+        for entry in history:
+            for model, status in entry.get("models", {}).items():
+                tally.setdefault(model, {}).setdefault(status, 0)
+                tally[model][status] += 1
+        print(f"  probe history    : last {len(history)} probes")
+        for model in sorted(tally):
+            counts = sorted(tally[model].items(), key=lambda kv: -kv[1])
+            parts = ", ".join(f"{status} x{count}" for status, count in counts)
+            print(f"    {model}: {parts}")
     print(
         f"  paths            : config_dirs={len(paths_info['config_dirs'])}"
         f" | cache_dirs={len(paths_info['cache_dirs'])}"

@@ -9,7 +9,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 from .config import AccountPoolConfig
 
@@ -43,22 +43,37 @@ class AccountHealth:
             return sum(self.results) / len(self.results)
         return self.success_count / max(self.total_count, 1)
 
-    def calculate_score(self) -> float:
-        """Health score 0.0 - 1.0 (higher = healthier)"""
+    DEFAULT_WEIGHTS: ClassVar[dict[str, float]] = {
+        "success": 0.5,
+        "latency": 0.3,
+        "recency": 0.2,
+    }
 
-        # Success rate (50% weight)
+    def calculate_score(self, weights: dict[str, float] | None = None) -> float:
+        """Health score 0.0 - 1.0 (higher = healthier)
+
+        `weights` overrides the default success/latency/recency blend
+        (`[account_pool].score_weights`).
+        """
+        w = weights or self.DEFAULT_WEIGHTS
+
+        # Success rate
         success_score = self.success_rate
 
-        # Latency score (30% weight): 100ms = 1.0, >1000ms = 0.0
+        # Latency score: 100ms = 1.0, >1000ms = 0.0
         latency_score = max(0.0, 1.0 - (self.avg_latency_ms - 100) / 900)
 
-        # Recency score (20% weight): 0h = 0.0, 24h+ = 1.0
+        # Recency score: 0h = 0.0, 24h+ = 1.0
         hours_since_error = (
             (time.time() - self.last_error_time) / 3600 if self.last_error_time > 0 else 24
         )
         recency_score = min(1.0, hours_since_error / 24)
 
-        return success_score * 0.5 + latency_score * 0.3 + recency_score * 0.2
+        return (
+            success_score * w.get("success", 0.0)
+            + latency_score * w.get("latency", 0.0)
+            + recency_score * w.get("recency", 0.0)
+        )
 
 
 @dataclass
@@ -123,7 +138,10 @@ class AccountPool:
         return min(self.accounts, key=lambda a: self.health[a.name].total_count)
 
     def _healthiest(self) -> Account:
-        return max(self.accounts, key=lambda a: self.health[a.name].calculate_score())
+        return max(
+            self.accounts,
+            key=lambda a: self.health[a.name].calculate_score(self.config.score_weights),
+        )
 
     def mark_result(self, name: str, success: bool, latency_ms: float = 0.0) -> None:
         """Record probe result for health tracking"""

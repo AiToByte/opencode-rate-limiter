@@ -600,3 +600,103 @@ class TestHealthSlidingWindow:
     def test_window_validation(self):
         with pytest.raises(ValueError, match="health_window"):
             AccountPoolConfig(accounts=[], health_window=0).validate()
+
+
+# =============================================================================
+# Iteration round 5: shared client / score weights
+# =============================================================================
+
+
+class TestProberSharedClient:
+    @pytest.mark.asyncio
+    async def test_probe_all_builds_one_client(self, httpx_mock, monkeypatch):
+        """probe_all 全程只建一个共享 AsyncClient"""
+        for _ in range(3):
+            httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
+        prober = ModelProber(10.0)
+        calls = []
+        orig = prober._build_client
+
+        def counting():
+            calls.append(1)
+            return orig()
+
+        monkeypatch.setattr(prober, "_build_client", counting)
+        results = await prober.probe_all(["a", "b", "c"], {})
+        assert len(results) == 3
+        assert len(calls) == 1
+        assert prober._shared_client is None  # 用完即清，防泄漏
+
+    @pytest.mark.asyncio
+    async def test_probe_standalone_builds_own_client(self, httpx_mock):
+        """单独 probe() 使用一次性客户端"""
+        httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
+        prober = ModelProber(10.0)
+        result = await prober.probe("m1", {})
+        assert result.status == "available"
+        assert prober._shared_client is None
+
+    @pytest.mark.asyncio
+    async def test_http2_falls_back_without_h2(self, httpx_mock, monkeypatch, caplog):
+        """http2=True 但缺 h2 包时回退 HTTP/1.1 并告警"""
+        import logging
+
+        httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
+        monkeypatch.setattr("importlib.util.find_spec", lambda _name: None)
+        prober = ModelProber(10.0, ProberConfig(http2=True))
+        with caplog.at_level(logging.WARNING, logger="prober"):
+            result = await prober.probe("m1", {})
+        assert result.status == "available"
+        assert any("h2" in r.message for r in caplog.records)
+
+    def test_pool_size_validation(self):
+        with pytest.raises(ValueError, match="connection_pool_size"):
+            ProberConfig(connection_pool_size=0).validate()
+
+
+class TestScoreWeights:
+    def test_calculate_score_custom_weights(self):
+        h = AccountHealth(name="a", success_count=5, total_count=10)
+        # success 权重 1.0 时评分即成功率
+        assert h.calculate_score({"success": 1.0, "latency": 0.0, "recency": 0.0}) == 0.5
+
+    def test_weights_validation(self):
+        with pytest.raises(ValueError, match="missing keys"):
+            AccountPoolConfig(score_weights={"success": 1.0, "latency": 0.0}).validate()
+        with pytest.raises(ValueError, match="unknown keys"):
+            AccountPoolConfig(
+                score_weights={"success": 0.5, "latency": 0.3, "recency": 0.1, "luck": 0.1}
+            ).validate()
+        with pytest.raises(ValueError, match=r"sum to 1\.0"):
+            AccountPoolConfig(
+                score_weights={"success": 0.5, "latency": 0.5, "recency": 0.5}
+            ).validate()
+        with pytest.raises(ValueError, match="within"):
+            AccountPoolConfig(
+                score_weights={"success": 2.0, "latency": -1.0, "recency": 0.0}
+            ).validate()
+        # 合法权重通过
+        AccountPoolConfig(score_weights={"success": 0.8, "latency": 0.1, "recency": 0.1}).validate()
+
+    def test_healthiest_respects_weights(self):
+        config = AccountPoolConfig(
+            accounts=[
+                {"name": "hi-success", "auth_json": "{}"},
+                {"name": "hi-latency", "auth_json": "{}"},
+            ],
+            strategy="health",
+            score_weights={"success": 1.0, "latency": 0.0, "recency": 0.0},
+        )
+        pool = AccountPool(config)
+        pool.health["hi-success"].success_count = 9
+        pool.health["hi-success"].total_count = 10
+        pool.health["hi-success"].avg_latency_ms = 2000
+        pool.health["hi-latency"].success_count = 5
+        pool.health["hi-latency"].total_count = 10
+        pool.health["hi-latency"].avg_latency_ms = 100
+        pick = pool.get_next()
+        assert pick is not None and pick.name == "hi-success"
+
+        pool.config.score_weights = {"success": 0.0, "latency": 1.0, "recency": 0.0}
+        pick = pool.get_next()
+        assert pick is not None and pick.name == "hi-latency"

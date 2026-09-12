@@ -163,6 +163,10 @@ opencode-rate-limiter/
   (timeout)`；未知异常 → `error(<异常文本>)`。空模型列表时 `probe_all` 立即返回空列表。
 - `probe_all(models, headers, headers_by_model)` 支持按模型覆盖请求头——`probe`/`daemon`
   用它实现按账号注入 `Authorization`（见下）。
+- **共享连接池**：一轮 `probe_all` 全程复用同一个 `httpx.AsyncClient`
+  （连接池大小 `[prober].connection_pool_size`，默认 8；`[prober].http2 = true` 启用
+  HTTP/2，需安装可选依赖 `h2`——`pip install 'opencode-rate-limiter[http2]'`，
+  缺失时告警并回退 HTTP/1.1）。单独调用的 `probe()` 使用一次性客户端。
 
 **账号轮换与探测的结合（probe / daemon）**
 - 配置了账号池时，`probe` 与 daemon 的每个探测周期都会**按策略为每个模型选取一个账号**
@@ -541,10 +545,12 @@ models = [                     # 探测模型（非空）；仅用默认时整�
 ]
 probe_timeout_seconds = 10.0   # 单次探测超时（秒），必须 > 0
 auto_cleanup_on_429 = true     # 遇 429 自动清理 + 账号轮换
+history_size = 20              # 探测历史环形缓冲条数
 
 [account_pool]
 strategy = "health"            # round_robin | least_used | health
 health_window = 100            # 健康度滑动窗口大小（近 N 次结果）
+score_weights = { success = 0.5, latency = 0.3, recency = 0.2 }  # 健康评分权重
 accounts = [
   { name = "primary", auth_path = "~/.opencode/auth.json" },
   { name = "backup1", env_var = "OPENCODE_AUTH_JSON_2" },
@@ -557,6 +563,8 @@ ping_message = "ping"          # 探测消息内容
 max_tokens = 1                 # 探测 max_tokens（>= 1）
 extra_headers = {}             # 附加请求头，如 { X-Trace = "abc" }
 # proxy = "http://127.0.0.1:7890"   # 可选代理（httpx >= 0.28）
+http2 = false                    # HTTP/2 探测（需可选依赖 h2）
+connection_pool_size = 8         # 共享连接池大小
 
 [headers]
 user_agent = "opencode/{version}"   # 模板仅支持 {version} 占位符
@@ -579,6 +587,7 @@ preserve_config = true         # 必须为 true（校验强制）
 | `models` | list[str] | `FREE_MODELS`（8 个） | 非空 |
 | `probe_timeout_seconds` | float | 10.0 | > 0 |
 | `auto_cleanup_on_429` | bool | true | - |
+| `history_size` | int | 20 | ≥ 1 |
 
 #### `[account_pool]`
 
@@ -586,6 +595,7 @@ preserve_config = true         # 必须为 true（校验强制）
 |------|------|------|------|
 | `strategy` | str | `health` | ∈ {round_robin, least_used, health} |
 | `health_window` | int | 100 | ≥ 1 |
+| `score_weights` | table | success=0.5, latency=0.3, recency=0.2 | 三键齐全、值 ∈ [0,1]、和为 1 |
 | `accounts` | list[table] | `[]` | 每个元素须为 dict，含 `name`，且含 `auth_path`/`env_var`/`auth_json` 之一 |
 
 账号读取优先级（`AccountPool.read_auth`）：`auth_json` > `env_var` > `auth_path`。
@@ -599,6 +609,8 @@ preserve_config = true         # 必须为 true（校验强制）
 | `max_tokens` | int | 1 | ≥ 1 |
 | `extra_headers` | table | `{}` | - |
 | `proxy` | str | 无 | httpx `proxy=` 格式（缺省走环境变量代理） |
+| `http2` | bool | false | 需可选依赖 `h2`，缺失时回退 HTTP/1.1 |
+| `connection_pool_size` | int | 8 | ≥ 1 |
 
 #### 策略算法
 
@@ -611,9 +623,10 @@ preserve_config = true         # 必须为 true（校验强制）
 健康度评分（`calculate_score`，0.0–1.0，越高越健康）：
 
 ```
-score = success_rate * 0.5
-      + latency_score * 0.3
-      + recency_score  * 0.2
+score = success_rate * w_success
+      + latency_score * w_latency
+      + recency_score  * w_recency
+（w_* 由 [account_pool].score_weights 配置，默认 0.5 / 0.3 / 0.2）
 
 success_rate  = 滑动窗口内成功率（窗口为空时回退 success_count / max(total_count, 1)）
 latency_score = max(0.0, 1.0 - (avg_latency_ms - 100) / 900)   # 100ms→1.0，1000ms→0.0
@@ -741,6 +754,7 @@ START
 running / uptime_seconds / last_probe / next_probe / last_cleanup
 total_cycles / total_cleanups / models(按名排序的探测结果)
 pool_health(账号健康快照: success / total / consecutive_failures / avg_latency_ms / score)
+history(探测历史环形缓冲: [{ts, models: {模型: 状态}}]，最多 history_size 条)
 pid / updated_at
 ```
 

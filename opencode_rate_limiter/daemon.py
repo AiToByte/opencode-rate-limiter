@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import sys
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,6 +55,7 @@ class DaemonStatus:
     total_cleanups: int = 0
     model_results: dict[str, ProbeResult] = field(default_factory=dict)
     pool_health: dict[str, dict[str, Any]] = field(default_factory=dict)
+    history: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=20))
 
     def to_dict(self) -> dict[str, Any]:
         import time
@@ -71,6 +73,7 @@ class DaemonStatus:
             "total_cleanups": self.total_cleanups,
             "models": {name: r.to_dict() for name, r in sorted(self.model_results.items())},
             "pool_health": self.pool_health,
+            "history": list(self.history),
         }
 
 
@@ -174,6 +177,10 @@ class RateLimiterDaemon:
         self.pool = (
             AccountPool(self.config.account_pool) if self.config.account_pool.accounts else None
         )
+        # (Re)size the probe-history ring buffer to the configured window
+        size = self.config.daemon.history_size
+        if self.status.history.maxlen != size:
+            self.status.history = deque(self.status.history, maxlen=size)
 
     async def run(self) -> None:
         import time
@@ -325,16 +332,22 @@ class RateLimiterDaemon:
 
         # Snapshot account health for the persisted state file
         if self.pool is not None:
+            weights = self.config.account_pool.score_weights
             self.status.pool_health = {
                 name: {
                     "success": h.success_count,
                     "total": h.total_count,
                     "consecutive_failures": h.consecutive_failures,
                     "avg_latency_ms": round(h.avg_latency_ms, 1),
-                    "score": round(h.calculate_score(), 3),
+                    "score": round(h.calculate_score(weights), 3),
                 }
                 for name, h in sorted(self.pool.health.items())
             }
+
+        # Ring-buffer entry for trend analysis (check command)
+        self.status.history.append(
+            {"ts": self.status.last_probe, "models": {r.model: r.status for r in results}}
+        )
 
         next_ts = _dt.datetime.now(_dt.UTC) + _dt.timedelta(
             seconds=self._effective_interval() * self._backoff_multiplier()
