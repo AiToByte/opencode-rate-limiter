@@ -9,6 +9,19 @@ All notable changes to opencode-rate-limiter will be documented in this file.
 
 ### Added
 
+- **每模型限流冷却期**：模型探测到 429 后按 `Retry-After`（缺失用 60s 估算）进入冷却，
+  冷却期内 daemon 跳过该模型的探测——不再对着已知限流的模型空烧配额；
+  恢复可用即解除，`[daemon].respect_cooldown` 可关闭；剩余冷却随状态文件持久化
+  并在 `check` 人读输出中显示（跨重启不保留）。
+- **`probe` 输出标注账号**：人读输出追加 `[account: <名>]` 标签，JSON 输出每项新增
+  `account` 字段，轮换是否生效一目了然。
+
+### Changed
+
+- **429 自动清理每轮去重**：此前同轮每个 rate_limited 模型都会各触发一次
+  `full_cleanup()`（一轮最多 N 次全量清理）；现在每轮至多一次。
+- `_handle_rate_limited` 只负责失败标记与账号轮换，清理职责上收到探测周期。
+
 - **探测历史环形缓冲**：`[daemon].history_size`（默认 20）条最近探测摘要
   （`{ts, models}`）随状态文件持久化；`check` 人读输出新增
   `probe history` 趋势段（各模型近 N 轮的状态计数）。

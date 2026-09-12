@@ -39,6 +39,7 @@ class DaemonConfig:
     probe_timeout_seconds: float = 10.0
     auto_cleanup_on_429: bool = True
     history_size: int = 20
+    respect_cooldown: bool = True
 
     def validate(self) -> None:
         if self.interval_seconds < 5:
@@ -366,6 +367,7 @@ class Config:
                 "probe_timeout_seconds": self.daemon.probe_timeout_seconds,
                 "auto_cleanup_on_429": self.daemon.auto_cleanup_on_429,
                 "history_size": self.daemon.history_size,
+                "respect_cooldown": self.daemon.respect_cooldown,
             },
             "account_pool": {
                 "accounts": self.account_pool.accounts,

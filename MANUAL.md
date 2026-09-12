@@ -316,12 +316,13 @@ opencode-rate-limiter probe [MODEL] [--json]
   头（token 无法解析的账号回退为无鉴权头），探测结果回写账号健康度（见 §2.3）。
 - 人类可读输出（每模型两行）：
   ```
-    [+] deepseek-v4-flash-free: available (45ms)
-    [!] nemotron-3-ultra-free: rate_limited (120ms)
+    [+] deepseek-v4-flash-free: available (45ms) [account: primary]
+    [!] nemotron-3-ultra-free: rate_limited (120ms) [account: backup1]
         retry_after: 60s
     [x] big-pickle: error (2000ms)
         error: timeout
   ```
+  配置账号池时，JSON 输出每项额外含 `"account"` 字段（服务该模型的账号，未配置时为 null）。
   图标映射：`available→+`、`rate_limited→!`、`error→x`、`unknown→?`。
 - `--json` 输出：`ProbeResult.to_dict()` 数组：
   `model / status / http_status / retry_after / estimated_reset / latency_ms / error / timestamp`。
@@ -588,6 +589,7 @@ preserve_config = true         # 必须为 true（校验强制）
 | `probe_timeout_seconds` | float | 10.0 | > 0 |
 | `auto_cleanup_on_429` | bool | true | - |
 | `history_size` | int | 20 | ≥ 1 |
+| `respect_cooldown` | bool | true | 限流模型的冷却期内跳过探测（省配额） |
 
 #### `[account_pool]`
 
@@ -708,9 +710,12 @@ START
                  mark_result(当前账号, 失败) → get_next() → 日志记录轮换方向
               b. 若 auto_cleanup_on_429：异步执行 full_cleanup()，
                  total_cleanups += 1、last_cleanup = now
-         5. 连续全错周期计数（error_streak）：全 error → +1，否则清零
-         6. 账号健康快照写入状态（pool_health）
-         7. next_probe = now + interval × 退避倍数（1×/2×/4×/8×，见 §6.1.1）；
+         5. 限流冷却：对 rate_limited 模型按 retry_after（缺失用估算值）设置冷却期，
+            冷却期内的模型在后续周期跳过探测（respect_cooldown 可关）；恢复可用即解除
+         6. 自动清理每轮至多一次（即使同轮多个模型限流）
+         7. 连续全错周期计数（error_streak）：全 error → +1，否则清零
+         8. 账号健康快照写入状态（pool_health）
+         9. next_probe = now + interval × 退避倍数（1×/2×/4×/8×，见 §6.1.1）；
             _persist_state()
        _wait(interval × 退避倍数)   # 监听 stop/probe 事件，超时继续
 
@@ -755,6 +760,7 @@ running / uptime_seconds / last_probe / next_probe / last_cleanup
 total_cycles / total_cleanups / models(按名排序的探测结果)
 pool_health(账号健康快照: success / total / consecutive_failures / avg_latency_ms / score)
 history(探测历史环形缓冲: [{ts, models: {模型: 状态}}]，最多 history_size 条)
+cooldowns(模型 → 剩余冷却秒数，仅内存状态，重启后清零)
 pid / updated_at
 ```
 

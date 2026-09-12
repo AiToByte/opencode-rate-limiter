@@ -122,12 +122,15 @@ async def cmd_probe(config: Config, args: argparse.Namespace) -> int:
             pool.mark_result(name, success=r.status == "available", latency_ms=r.latency_ms)  # type: ignore[union-attr]
 
     if args.json:
-        print(json.dumps([r.to_dict() for r in results], indent=2, ensure_ascii=False))
+        payload = [{**r.to_dict(), "account": account_by_model.get(r.model)} for r in results]
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         status_icons = {"available": "+", "rate_limited": "!", "error": "x", "unknown": "?"}
         for r in results:
             icon = status_icons.get(r.status, "?")
-            print(f"  [{icon}] {r.model}: {r.status} ({r.latency_ms:.0f}ms)")
+            account_name = account_by_model.get(r.model)
+            tag = f" [account: {account_name}]" if account_name else ""
+            print(f"  [{icon}] {r.model}: {r.status} ({r.latency_ms:.0f}ms){tag}")
             if r.retry_after:
                 print(f"      retry_after: {r.retry_after}s")
             if r.error:
@@ -318,6 +321,10 @@ async def cmd_check(config: Config, args: argparse.Namespace) -> int:
             f" | cycles={daemon_info.get('total_cycles', 0)}"
             f" | uptime={daemon_info.get('uptime_seconds', 0)}s"
         )
+    cooldowns = daemon_info.get("cooldowns")
+    if cooldowns:
+        parts = ", ".join(f"{m}={s}s" for m, s in sorted(cooldowns.items()))
+        print(f"  cooldowns        : {parts}")
     print(
         f"  account pool     : {pool_info['configured_accounts']} account(s)"
         f" | strategy={pool_info['strategy']}"

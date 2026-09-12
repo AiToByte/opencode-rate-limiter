@@ -151,6 +151,7 @@ class RateLimiterDaemon:
         self._stop_event = asyncio.Event()
         self._probe_event = asyncio.Event()
         self._error_streak = 0
+        self._cooldowns: dict[str, float] = {}  # model -> monotonic deadline
         self._prev_handlers: dict[int, Any] = {}
         self._signal_fallback_sigs: list[int] = []
         self._rebuild()
@@ -275,17 +276,36 @@ class RateLimiterDaemon:
             self._probe_event.clear()
 
     async def _probe_cycle(self) -> None:
+        import time
+
+        now = time.monotonic()
         models = self._effective_models()
         self.status.total_cycles += 1
         self.status.last_probe = _now_iso()
-        self.log.info("Starting probe cycle", extra={"models": len(models)})
+
+        # Per-model rate-limit cooldown: skip models whose cooldown window has
+        # not elapsed yet to avoid burning quota on known-limited models.
+        skip: dict[str, float] = {}
+        if self.config.daemon.respect_cooldown:
+            skip = {m: until for m, until in self._cooldowns.items() if until > now}
+        active = [m for m in models if m not in skip]
+        if skip:
+            self.log.info(
+                "Skipping models in rate-limit cooldown",
+                extra={
+                    "models": sorted(skip),
+                    "cooldown_seconds": {m: round(until - now) for m, until in skip.items()},
+                },
+            )
+
+        self.log.info("Starting probe cycle", extra={"models": len(active)})
 
         # Per-model account rotation: pick an account per model and inject its
         # auth token into that probe's headers when resolvable.
         headers_by_model: dict[str, dict[str, str]] = {}
         account_by_model: dict[str, str] = {}
         if self.pool is not None:
-            for model in models:
+            for model in active:
                 account = self.pool.get_next()
                 if account is None:
                     continue
@@ -294,7 +314,7 @@ class RateLimiterDaemon:
                 if token:
                     headers_by_model[model] = self.injector.build_headers(token=token)
 
-        results = await self.prober.probe_all(models, self.headers, headers_by_model or None)
+        results = await self.prober.probe_all(active, self.headers, headers_by_model or None)
 
         for r in results:
             self.status.model_results[r.model] = r
@@ -320,9 +340,30 @@ class RateLimiterDaemon:
                         name, success=r.status == "available", latency_ms=r.latency_ms
                     )
 
+        limited = [r for r in results if r.status == "rate_limited"]
+        for r in limited:
+            await self._handle_rate_limited(r, account_by_model.get(r.model))
+
+        # One full cleanup per cycle at most, even when several models are
+        # rate-limited in the same pass
+        if limited and self.config.daemon.auto_cleanup_on_429:
+            await asyncio.to_thread(self.cleanup.full_cleanup)
+            self.status.total_cleanups += 1
+            self.status.last_cleanup = _now_iso()
+            self.log.info(
+                "Auto cleanup triggered", extra={"trigger": "429", "models": len(limited)}
+            )
+
+        # Arm cooldowns for rate-limited models (retry_after, else estimate)
+        if self.config.daemon.respect_cooldown:
+            for r in limited:
+                wait = r.retry_after or r.estimated_reset
+                if wait:
+                    self._cooldowns[r.model] = time.monotonic() + wait
+        # Clear cooldowns for models that probed fine
         for r in results:
-            if r.status == "rate_limited":
-                await self._handle_rate_limited(r, account_by_model.get(r.model))
+            if r.status != "rate_limited":
+                self._cooldowns.pop(r.model, None)
 
         # Backoff: every probe in the cycle errored (network/endpoint trouble)
         if results and all(r.status == "error" for r in results):
@@ -362,6 +403,13 @@ class RateLimiterDaemon:
     def _persist_state(self) -> None:
         """Write the current status snapshot to the state file"""
         data = self.status.to_dict()
+        if self._cooldowns:
+            import time
+
+            now = time.monotonic()
+            data["cooldowns"] = {
+                m: round(until - now) for m, until in sorted(self._cooldowns.items()) if until > now
+            }
         data["pid"] = os.getpid()
         data["updated_at"] = _now_iso()
         write_daemon_state(data, self._state_path)
@@ -397,11 +445,8 @@ class RateLimiterDaemon:
                         },
                     )
 
-        if self.config.daemon.auto_cleanup_on_429:
-            await asyncio.to_thread(self.cleanup.full_cleanup)
-            self.status.total_cleanups += 1
-            self.status.last_cleanup = _now_iso()
-            self.log.info("Auto cleanup triggered", extra={"trigger": "429", "model": result.model})
+        # Note: the auto-cleanup itself runs once per probe cycle (see
+        # _probe_cycle), not once per rate-limited model.
 
     def _install_signal_handlers(self) -> None:
         import signal

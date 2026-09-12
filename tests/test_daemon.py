@@ -691,3 +691,135 @@ class TestProbeHistory:
         assert "probe history    : last 3 probes" in out
         assert "m1: available x2, error x1" in out
         assert "m2: available x2, rate_limited x1" in out
+
+
+class TestRateLimitCooldown:
+    """每模型限流冷却期测试"""
+
+    @pytest.mark.asyncio
+    async def test_cooldown_skips_rate_limited_model(self, tmp_path):
+        """限流模型在冷却期内不再重复探测"""
+        daemon = make_daemon(tmp_path, models=["m1"], auto_cleanup=False)
+        calls: list[str] = []
+
+        async def flaky_probe(model: str, headers: dict[str, str]) -> ProbeResult:
+            calls.append(model)
+            if len(calls) == 1:
+                return ProbeResult(
+                    model=model,
+                    status="rate_limited",
+                    http_status=429,
+                    retry_after=120,
+                    estimated_reset=120,
+                    timestamp="t",
+                )
+            return ProbeResult(model=model, status="available", latency_ms=1.0, timestamp="t")
+
+        daemon.prober.probe = flaky_probe  # type: ignore[method-assign]
+        await daemon._probe_cycle()
+        await daemon._probe_cycle()
+        assert calls == ["m1"]  # 第二轮被冷却跳过
+
+    @pytest.mark.asyncio
+    async def test_respect_cooldown_false_probes_every_cycle(self, tmp_path):
+        daemon = make_daemon(tmp_path, models=["m1"], auto_cleanup=False)
+        daemon.config.daemon.respect_cooldown = False
+        calls: list[str] = []
+
+        async def limited_probe(model: str, headers: dict[str, str]) -> ProbeResult:
+            calls.append(model)
+            return ProbeResult(
+                model=model,
+                status="rate_limited",
+                http_status=429,
+                retry_after=120,
+                estimated_reset=120,
+                timestamp="t",
+            )
+
+        daemon.prober.probe = limited_probe  # type: ignore[method-assign]
+        await daemon._probe_cycle()
+        await daemon._probe_cycle()
+        assert calls == ["m1", "m1"]
+
+    @pytest.mark.asyncio
+    async def test_cooldown_cleared_on_recovery(self, tmp_path):
+        """恢复可用后冷却期解除"""
+        daemon = make_daemon(tmp_path, models=["m1"], auto_cleanup=False)
+        calls: list[str] = []
+
+        async def probe(model: str, headers: dict[str, str]) -> ProbeResult:
+            calls.append(model)
+            if len(calls) == 1:
+                return ProbeResult(
+                    model=model,
+                    status="rate_limited",
+                    http_status=429,
+                    retry_after=1,
+                    estimated_reset=1,
+                    timestamp="t",
+                )
+            return ProbeResult(model=model, status="available", latency_ms=1.0, timestamp="t")
+
+        daemon.prober.probe = probe  # type: ignore[method-assign]
+        await daemon._probe_cycle()
+        # 手动过期冷却，模拟时间流逝
+        daemon._cooldowns["m1"] = 0.0
+        await daemon._probe_cycle()
+        assert calls == ["m1", "m1"]
+        assert "m1" not in daemon._cooldowns
+
+    @pytest.mark.asyncio
+    async def test_cooldown_persisted(self, tmp_path):
+        daemon = make_daemon(tmp_path, models=["m1"], auto_cleanup=False)
+
+        async def limited_probe(model: str, headers: dict[str, str]) -> ProbeResult:
+            return ProbeResult(
+                model=model,
+                status="rate_limited",
+                http_status=429,
+                retry_after=90,
+                estimated_reset=90,
+                timestamp="t",
+            )
+
+        daemon.prober.probe = limited_probe  # type: ignore[method-assign]
+        await daemon._probe_cycle()
+
+        data = json.loads((tmp_path / "daemon.json").read_text(encoding="utf-8"))
+        assert 0 < data["cooldowns"]["m1"] <= 90
+
+
+class TestCleanupDedupPerCycle:
+    """同轮多个模型限流只触发一次清理"""
+
+    @pytest.mark.asyncio
+    async def test_one_cleanup_for_multiple_rate_limited(self, tmp_path, monkeypatch):
+        state_file = tmp_path / "state" / "state.json"
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(
+            "opencode_rate_limiter.cleanup.get_opencode_native_state_files",
+            lambda: [state_file],
+        )
+        monkeypatch.setattr("opencode_rate_limiter.cleanup.get_opencode_auth_files", lambda: [])
+        monkeypatch.setattr(
+            "opencode_rate_limiter.cleanup.get_opencode_native_cache_dirs", lambda: []
+        )
+        daemon = make_daemon(tmp_path, models=["m1", "m2"], auto_cleanup=True)
+
+        async def limited_probe(model: str, headers: dict[str, str]) -> ProbeResult:
+            return ProbeResult(
+                model=model,
+                status="rate_limited",
+                http_status=429,
+                retry_after=60,
+                estimated_reset=60,
+                timestamp="t",
+            )
+
+        daemon.prober.probe = limited_probe  # type: ignore[method-assign]
+        await daemon._probe_cycle()
+
+        assert daemon.status.total_cleanups == 1
+        assert not state_file.exists()

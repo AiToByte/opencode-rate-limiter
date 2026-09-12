@@ -700,3 +700,53 @@ class TestScoreWeights:
         pool.config.score_weights = {"success": 0.0, "latency": 1.0, "recency": 0.0}
         pick = pool.get_next()
         assert pick is not None and pick.name == "hi-latency"
+
+
+class TestProbeAccountTag:
+    """probe 输出标注账号"""
+
+    def _make_config(self, accounts: list[dict[str, Any]], models: list[str]) -> Config:
+        from opencode_rate_limiter import DaemonConfig
+
+        return Config(
+            daemon=DaemonConfig(models=models),
+            account_pool=AccountPoolConfig(accounts=accounts, strategy="round_robin"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_probe_human_output_tags_account(self, httpx_mock, monkeypatch, capsys):
+        """人读输出标注服务该模型的账号"""
+        import argparse
+
+        from opencode_rate_limiter import cmd_probe
+
+        monkeypatch.setattr("opencode_rate_limiter.cli.get_opencode_version", lambda: "1.0")
+        httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
+        config = self._make_config(
+            accounts=[{"name": "primary", "auth_json": '{"access_token": "tok"}'}],
+            models=["m1"],
+        )
+
+        rc = await cmd_probe(config, argparse.Namespace(model="all", json=False))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "[account: primary]" in out
+
+    @pytest.mark.asyncio
+    async def test_probe_json_includes_account(self, httpx_mock, monkeypatch, capsys):
+        """JSON 输出包含 account 字段"""
+        import argparse
+
+        from opencode_rate_limiter import cmd_probe
+
+        monkeypatch.setattr("opencode_rate_limiter.cli.get_opencode_version", lambda: "1.0")
+        httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
+        config = self._make_config(
+            accounts=[{"name": "primary", "auth_json": '{"access_token": "tok"}'}],
+            models=["m1"],
+        )
+
+        rc = await cmd_probe(config, argparse.Namespace(model="all", json=True))
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data[0]["account"] == "primary"
