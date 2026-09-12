@@ -1,0 +1,119 @@
+[project]
+name = "opencode-rate-limiter"
+version = "0.1.0"
+description = "OpenCode 免费模型限流缓解与账号池管理工具"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "OpenCode Rate Limiter Contributors"}
+]
+keywords = ["opencode", "rate-limit", "llm", "cli", "zen", "free-models"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Monitoring",
+]
+dependencies = [
+    "httpx>=0.28",
+    "tomli-w>=1.0",
+    "platformdirs>=4.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-mock>=3.12",
+    "pytest-asyncio>=0.23",
+    "pytest-httpx>=0.29",
+    "pytest-cov>=4.0",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "pre-commit>=3.6",
+]
+build = [
+    "pyinstaller>=6.8",
+]
+
+[project.scripts]
+opencode-rate-limiter = "opencode_rate_limiter:main"
+
+[project.urls]
+Homepage = "https://github.com/anomalyco/opencode-rate-limiter"
+Repository = "https://github.com/anomalyco/opencode-rate-limiter"
+Issues = "https://github.com/anomalyco/opencode-rate-limiter/issues"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "PTH", "T20", "ARG", "SIM", "N", "Q", "RUF"]
+ignore = [
+    "S101",
+    "PTH123",
+    "ARG001",
+    "ARG002",
+    "T201",
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # %-format is retained for brace-heavy shell completion templates (${cur}, {${commands}}),
+    # where f-string/.format() would require error-prone double-brace escaping.
+    "UP031",
+]
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+show_error_codes = true
+pretty = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*", "scripts.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+ignore_missing_imports = true
+warn_return_any = false
+disable_error_code = ["import-not-found", "import-untyped"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short --strict-markers"
+
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*", "scripts/*", "*.pyi"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
