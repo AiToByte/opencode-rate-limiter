@@ -5,9 +5,16 @@ All notable changes to opencode-rate-limiter will be documented in this file.
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.2.0] - 2026-09-12
 
 ### Added
+
+- **`rotate --apply`：真实切换账号**：把选中账号解析出的 auth JSON 写入活动的
+  OpenCode `auth.json`（目标已存在时先备份为 `auth.json.bak`，与清理器备份约定一致）；
+  账号无可解析 auth 时报错退出码 1；`--dry-run` 预览目标路径不写盘。
+  JSON 输出新增 `applied`（applied/dry_run/no_resolvable_auth）与 `auth_target` 字段。
+- **daemon 重载保留健康度**：SIGHUP 触发 `_reload_config()` 重建组件时，同名账号的
+  `AccountHealth`（含滑动窗口）跨重载保留，策略决策与 `pool_health` 快照不再归零。
 
 - **`[prober]` 配置段**：探测端点（`endpoint`）、ping 载荷（`ping_message`/`max_tokens`）、
   附加请求头（`extra_headers`）与代理（`proxy`，httpx ≥ 0.28）均可配置，

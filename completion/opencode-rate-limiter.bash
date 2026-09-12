@@ -11,7 +11,7 @@ _opencode_rate_limiter() {
         daemon) COMPREPLY=( $(compgen -W "--interval --models" -- "${cur}") ); return 0 ;;
         generate-config) COMPREPLY=( $(compgen -W "--force" -- "${cur}") ); return 0 ;;
         headers) COMPREPLY=( $(compgen -W "--model --export" -- "${cur}") ); return 0 ;;
-        rotate) COMPREPLY=( $(compgen -W "--strategy" -- "${cur}") ); return 0 ;;
+        rotate) COMPREPLY=( $(compgen -W "--strategy --apply" -- "${cur}") ); return 0 ;;
         probe) COMPREPLY=( $(compgen -W "deepseek-v4-flash-free nemotron-3-ultra-free big-pickle mimo-v2.5-free hy3-free laguna-s-2.1-free ling-3.0-flash-fin-free nemotron-3.5-lightning-free all" -- "${cur}") ); return 0 ;;
     esac
 

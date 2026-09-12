@@ -1,6 +1,6 @@
 # opencode-rate-limiter 技术说明与使用手册
 
-版本：0.1.0
+版本：0.2.0
 适用范围：本手册内容全部来自对 `opencode_rate_limiter.py` 实际代码的核对（源码共 2080 行，
 单文件实现），不描述任何未实现的功能。与 `docs/` 目录下早期文档不一致之处，以本手册为准；
 差异清单见文末「实现事实与文档差异」章节。
@@ -372,12 +372,16 @@ opencode-rate-limiter rotate [--strategy round_robin|least_used|health]
 | 选项 | 默认 | 说明 |
 |------|------|------|
 | `--strategy` | `health` | 选择策略；传入后**覆盖**配置文件中的 `strategy` |
+| `--apply` | 关 | 把选中账号解析出的 auth JSON 写入活动的 OpenCode `auth.json`（先备份为 `auth.json.bak`） |
 
 - 行为：临时将 `config.account_pool.strategy` 设为 CLI 值，构造 `AccountPool`，调用
-  `get_next()` 选出「下一个」账号，并用 `resolve_token()` 解析其 bearer token。仅打印
-  结果，**不修改任何文件**。
+  `get_next()` 选出「下一个」账号，并用 `resolve_token()` 解析其 bearer token。
+- **`--apply`**：把选中账号 `read_auth()` 得到的完整 auth JSON 写入目标 `auth.json`
+  （第一个已存在的候选 auth 文件，均不存在时创建第一个候选路径；已存在则先备份）。
+  账号无可解析 auth 时报错，退出码 `1`；与 `--dry-run` 组合只打印目标路径不写盘。
 - `--json` 输出：`{"rotated_to": name, "strategy": ..., "accounts": [...],
-  "auth_token_resolved": bool, "dry_run": bool}`。
+  "auth_token_resolved": bool, "dry_run": bool, "applied": "applied"|"dry_run"|null,
+  "auth_target": path|null}`。
 - 人类可读输出会显示 `Auth token resolved: yes/no`。
 - `--dry-run`：输出带 `(dry run) Preview only` 标注（`rotate` 本身无副作用，预览与
   实际执行一致，但 dry-run 标记会体现在输出中）。
@@ -930,7 +934,7 @@ uv run mypy .
 
 ### 11.3 版本一致性
 
-发布前核对三处版本号均为 `0.1.0`：`opencode_rate_limiter.__version__`、
+发布前核对三处版本号一致：`opencode_rate_limiter.__version__`、
 `pyproject.toml`、`man/opencode-rate-limiter.1`。发布步骤见 `docs/release.md`；
 变更记录见 `CHANGELOG.md`。
 
@@ -952,7 +956,7 @@ uv run mypy .
 | 头模板变量 `{timestamp}` / `{random}`（configuration.md） | 仅 `{version}` 被 `.format()` 替换 | 写入即字面量 |
 | ~~文件锁防并发守护进程~~（已实现） | daemon 启动时获取单实例锁，存活实例报错退出，过期锁自动接管（见 §6.4） | 已解决 |
 | ~~`OPENCODE_VERSION=xxx` 覆盖版本~~（已实现） | `OPENCODE_VERSION` 非空时优先于 `opencode --version` | 已解决 |
-| ~~`rotate` 是「名义轮换」~~（已接入网络层） | `probe`/daemon 按账号轮换为探测注入 `Authorization`，结果回写健康度（见 §2.3）；`rotate` 仍只做选择+解析校验，不写 auth.json | 已解决（rotate 本身仍不直接发起请求） |
+| ~~`rotate` 是「名义轮换」~~（已解决） | `probe`/daemon 按账号轮换为探测注入 `Authorization`，结果回写健康度（见 §2.3）；`rotate --apply` 可把账号 auth 真实写入 `auth.json`（带备份） | 已解决 |
 | ~~`rotate --dry-run` 被静默忽略~~（已修复） | `--dry-run` 体现在输出（`dry_run` 字段 / `(dry run)` 标注） | 已解决 |
 | 配置校验「accounts 非空才可 rotate/daemon」 | 校验只要求字段合法；空账号池被允许（daemon 跳过池、rotate 报退出码 1） | 行为比文档宽松 |
 | 代理经配置段设置（troubleshooting.md） | 无配置段；httpx 默认遵循标准 `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` 环境变量 | 代理可用但无法精细配置 |
@@ -965,9 +969,9 @@ uv run mypy .
 
 ## 13. 已知限制
 
-1. **账号轮换仅作用于本工具发起的探测请求**：`probe`/daemon 的探测现在按账号注入
-   `Authorization` 并回写健康度，但 `rotate` 子命令本身仍只做选择与 token 解析校验，
-   不改写 `auth.json`、也不影响 OpenCode CLI 自身发出的请求（后者仍依赖其本地 auth）。
+1. **账号轮换默认不写盘**：`probe`/daemon 的探测按账号注入 `Authorization` 并回写健康度；
+   `rotate` 默认只做选择与 token 解析校验，加 `--apply` 才会把账号 auth 写入
+   OpenCode 的 `auth.json`（带备份），且不影响 OpenCode CLI 正在运行中的会话。
 2. **token 解析只认 `access_token` 字段**（顶层或一层嵌套）；OpenCode auth 结构变化时
    需要扩展 `extract_access_token`。
 3. **头模板只支持 `{version}`** 一个占位符。

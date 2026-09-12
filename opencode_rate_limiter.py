@@ -28,7 +28,7 @@ except ImportError:
 
 from platformdirs import user_config_dir, user_state_dir
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 # =============================================================================
@@ -1189,6 +1189,11 @@ Examples:
     rotate_p.add_argument(
         "--strategy", choices=["round_robin", "least_used", "health"], default="health"
     )
+    rotate_p.add_argument(
+        "--apply",
+        action="store_true",
+        help="把选中账号的 auth JSON 写入 OpenCode auth.json（先备份；需搭配 --dry-run 预览）",
+    )
 
     add_sub("check", "健康检查聚合输出")
 
@@ -1325,6 +1330,35 @@ async def cmd_headers(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def _apply_account_auth(
+    pool: AccountPool, account: Account, dry_run: bool
+) -> tuple[str, str | None]:
+    """Write the account's auth JSON into the active OpenCode auth.json
+
+    Backs up the existing file to `<name>.json.bak` first (same convention as
+    CleanupManager.rotate_auth_tokens). Returns (status, target_path) where
+    status is "applied", "dry_run", or an error string.
+    """
+    import shutil
+
+    auth = pool.read_auth(account)
+    if not auth:
+        return "no_resolvable_auth", None
+
+    candidates = get_opencode_auth_files()
+    target = next((p for p in candidates if p.exists()), candidates[0])
+
+    if dry_run:
+        return "dry_run", str(target)
+
+    if target.exists():
+        backup = target.with_suffix(".json.bak")
+        shutil.copy(target, backup)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(auth, indent=2, ensure_ascii=False), encoding="utf-8")
+    return "applied", str(target)
+
+
 async def cmd_rotate(config: Config, args: argparse.Namespace) -> int:
     log = logging.getLogger("cmd.rotate")
 
@@ -1346,6 +1380,18 @@ async def cmd_rotate(config: Config, args: argparse.Namespace) -> int:
         return 1
 
     token = pool.resolve_token(next_account)
+    apply_status: str | None = None
+    apply_target: str | None = None
+    if args.apply:
+        apply_status, apply_target = _apply_account_auth(pool, next_account, args.dry_run)
+        if apply_status == "no_resolvable_auth":
+            log.error("Cannot apply: account '%s' has no resolvable auth JSON", next_account.name)
+            return 1
+        log.info(
+            "Apply auth",
+            extra={"account": next_account.name, "target": apply_target, "status": apply_status},
+        )
+
     log.info(
         "Rotating to account",
         extra={
@@ -1365,6 +1411,8 @@ async def cmd_rotate(config: Config, args: argparse.Namespace) -> int:
                     "accounts": [a.name for a in pool.accounts],
                     "auth_token_resolved": token is not None,
                     "dry_run": bool(args.dry_run),
+                    "applied": apply_status,
+                    "auth_target": apply_target,
                 },
                 indent=2,
                 ensure_ascii=False,
@@ -1375,6 +1423,10 @@ async def cmd_rotate(config: Config, args: argparse.Namespace) -> int:
         print(f"Strategy: {args.strategy}")
         print(f"Available accounts: {', '.join(a.name for a in pool.accounts)}")
         print(f"Auth token resolved: {'yes' if token else 'no'}")
+        if apply_status == "applied":
+            print(f"Auth written to: {apply_target}")
+        elif apply_status == "dry_run":
+            print(f"(dry run) Would write auth to: {apply_target}")
         if args.dry_run:
             print("(dry run) Preview only - selection shown, nothing was changed")
 
@@ -1856,12 +1908,19 @@ class RateLimiterDaemon:
         except Exception as e:
             self.log.error("Config reload failed: %s", e)
             return
+        old_pool = self.pool
         # CLI overrides survive the reload
         new_config.daemon.interval_seconds = self._effective_interval()
         if self._models_override:
             new_config.daemon.models = list(self._models_override)
         self.config = new_config
         self._rebuild()
+        # Carry account health across the rebuild so strategy decisions and
+        # the persisted pool_health snapshot survive a reload
+        if self.pool is not None and old_pool is not None:
+            for name, health in old_pool.health.items():
+                if name in self.pool.health:
+                    self.pool.health[name] = health
         self.log.info(
             "Config reloaded",
             extra={"interval": self._effective_interval(), "models": len(self._effective_models())},

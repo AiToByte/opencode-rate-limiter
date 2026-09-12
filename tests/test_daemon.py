@@ -575,3 +575,38 @@ class TestPoolHealthPersistence:
         assert '"pool_health"' not in out  # 归位到 account_pool.health
         assert '"health"' in out
         assert '"score": 0.71' in out
+
+    @pytest.mark.asyncio
+    async def test_reload_preserves_account_health(self, tmp_path, monkeypatch):
+        """SIGHUP 重载后同名账号的健康度（含窗口）被保留"""
+        config = Config(
+            daemon=DaemonConfig(
+                interval_seconds=30,
+                models=["m1"],
+                probe_timeout_seconds=0.5,
+            ),
+            account_pool=AccountPoolConfig(
+                accounts=[{"name": "a", "auth_json": "{}"}], strategy="health"
+            ),
+        )
+        daemon = RateLimiterDaemon(config)
+        daemon._state_path = tmp_path / "daemon.json"
+        daemon._lock_path = tmp_path / "daemon.lock"
+
+        async def fail_probe(model: str, headers: dict[str, str]) -> ProbeResult:
+            return ProbeResult(model=model, status="error", error="boom", timestamp="t")
+
+        daemon.prober.probe = fail_probe  # type: ignore[method-assign]
+        await daemon._probe_cycle()  # mark_result 写入健康数据
+        assert daemon.pool is not None
+        assert daemon.pool.health["a"].total_count == 1
+
+        # 重载：Config.load 返回同一份配置（真实 SIGHUP 会读新文件）
+        def fake_load(cls, path=None):
+            return config
+
+        monkeypatch.setattr("opencode_rate_limiter.Config.load", classmethod(fake_load))
+        daemon._reload_config()
+
+        assert daemon.pool is not None
+        assert daemon.pool.health["a"].total_count == 1  # 健康度未归零

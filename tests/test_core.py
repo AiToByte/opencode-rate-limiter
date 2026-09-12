@@ -434,7 +434,7 @@ class TestCLI:
 
     def test_version_output(self):
         """Version string is valid"""
-        assert __version__ == "0.1.0"
+        assert __version__ == "0.2.0"
 
     def test_parser_has_all_subcommands(self):
         """All subcommands registered"""
@@ -696,7 +696,7 @@ class TestRotateDryRun:
 
     @pytest.mark.asyncio
     async def test_rotate_reports_dry_run_and_token(self, capsys):
-        args = argparse.Namespace(strategy="round_robin", json=True, dry_run=True)
+        args = argparse.Namespace(strategy="round_robin", json=True, dry_run=True, apply=False)
 
         rc = await cmd_rotate(self._make_config(), args)
         assert rc == 0
@@ -705,9 +705,59 @@ class TestRotateDryRun:
         assert data["dry_run"] is True
         assert data["auth_token_resolved"] is True
 
+    def _patch_auth_target(self, monkeypatch, tmp_path: Path) -> Path:
+        auth_target = tmp_path / "opencode" / "auth.json"
+        auth_target.parent.mkdir(parents=True, exist_ok=True)
+        auth_target.write_text('{"access_token": "old-token"}', encoding="utf-8")
+        monkeypatch.setattr("opencode_rate_limiter.get_opencode_auth_files", lambda: [auth_target])
+        return auth_target
+
+    @pytest.mark.asyncio
+    async def test_rotate_apply_writes_auth_with_backup(self, tmp_path: Path, monkeypatch, capsys):
+        """--apply 把选中账号的 auth JSON 写入目标并先备份"""
+        auth_target = self._patch_auth_target(monkeypatch, tmp_path)
+        args = argparse.Namespace(strategy="round_robin", json=True, dry_run=False, apply=True)
+
+        rc = await cmd_rotate(self._make_config(), args)
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["applied"] == "applied"
+        assert data["auth_target"] == str(auth_target)
+        # 新内容来自选中账号的 auth_json；旧内容已备份
+        assert json.loads(auth_target.read_text(encoding="utf-8"))["access_token"] == "tok-a"
+        backup = auth_target.with_suffix(".json.bak")
+        assert backup.exists()
+        assert json.loads(backup.read_text(encoding="utf-8"))["access_token"] == "old-token"
+
+    @pytest.mark.asyncio
+    async def test_rotate_apply_dry_run_touches_nothing(self, tmp_path: Path, monkeypatch, capsys):
+        auth_target = self._patch_auth_target(monkeypatch, tmp_path)
+        args = argparse.Namespace(strategy="round_robin", json=True, dry_run=True, apply=True)
+
+        rc = await cmd_rotate(self._make_config(), args)
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["applied"] == "dry_run"
+        assert data["auth_target"] == str(auth_target)
+        assert json.loads(auth_target.read_text(encoding="utf-8"))["access_token"] == "old-token"
+        assert not auth_target.with_suffix(".json.bak").exists()
+
+    @pytest.mark.asyncio
+    async def test_rotate_apply_unresolvable_auth_fails(self, tmp_path: Path, monkeypatch):
+        self._patch_auth_target(monkeypatch, tmp_path)
+        args = argparse.Namespace(strategy="round_robin", json=True, dry_run=False, apply=True)
+        config = Config(
+            account_pool=AccountPoolConfig(
+                accounts=[{"name": "a", "auth_json": "not-json"}], strategy="round_robin"
+            )
+        )
+
+        rc = await cmd_rotate(config, args)
+        assert rc == 1
+
     @pytest.mark.asyncio
     async def test_rotate_missing_token_reported(self, capsys):
-        args = argparse.Namespace(strategy="round_robin", json=True, dry_run=False)
+        args = argparse.Namespace(strategy="round_robin", json=True, dry_run=False, apply=False)
         config = Config(
             account_pool=AccountPoolConfig(
                 accounts=[{"name": "a", "auth_json": "{}"}], strategy="round_robin"
@@ -721,7 +771,7 @@ class TestRotateDryRun:
 
     @pytest.mark.asyncio
     async def test_rotate_dry_run_human_output(self, capsys):
-        args = argparse.Namespace(strategy="health", json=False, dry_run=True)
+        args = argparse.Namespace(strategy="health", json=False, dry_run=True, apply=False)
 
         rc = await cmd_rotate(self._make_config(), args)
         assert rc == 0

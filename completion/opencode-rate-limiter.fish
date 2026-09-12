@@ -55,6 +55,8 @@ complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from generate-co
 complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from headers" \
     -l model
     -l export
+complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from rotate" \
+    -l apply
 complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from rotate" -l strategy -a "(__fish_opencode_rate_limiter_strategies)"
 
 complete -c opencode-rate-limiter -f \

@@ -1,3 +1,7 @@
+> **注：本文档为早期拆分文档，已停止维护。** 部分内容属于当时的设计规划，
+> 与当前实现存在出入（差异清单见 MANUAL.md 第 12 节）。
+> **权威文档请以 [MANUAL.md](../MANUAL.md) 为准。**
+
 # 进阶用法指南
 
 ## 多账号轮换策略详解
@@ -16,21 +20,21 @@
 def calculate_health_score(account: Account) -> float:
     """
     评分范围: 0.0 - 1.0 (越高越健康)
-    
+
     因子权重:
     - 成功率 (50%): 近 100 次请求成功比例
     - 平均延迟 (30%): 归一化到 0-1，延迟越低分越高
     - 最近错误时间 (20%): 距离上次错误越久分越高
     """
     success_rate = account.success_count / max(account.total_count, 1)  # 50%
-    
+
     # 延迟归一化: 假设 100ms 基准，>1000ms 视为 0 分
     latency_score = max(0, 1 - (account.avg_latency_ms - 100) / 900)  # 30%
-    
+
     # 错误时间衰减: 1小时内有错误扣分，24小时后恢复
     hours_since_error = (now - account.last_error_time).total_seconds() / 3600
     error_score = min(1.0, hours_since_error / 24)  # 20%
-    
+
     return success_rate * 0.5 + latency_score * 0.3 + error_score * 0.2
 ```
 

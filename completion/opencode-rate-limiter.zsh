@@ -57,7 +57,7 @@ _opencode_rate_limiter() {
         'daemon: :(--interval --models)'
         'generate-config: :(--force)'
         'headers: :(--model --export)'
-        'rotate: :(--strategy)'
+        'rotate: :(--strategy --apply)'
         'probe: :($probe_models)'
 }
 
