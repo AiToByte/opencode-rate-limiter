@@ -1,8 +1,7 @@
 # opencode-rate-limiter 技术说明与使用手册
 
 版本：0.2.0
-适用范围：本手册内容全部来自对 `opencode_rate_limiter.py` 实际代码的核对（源码共 2080 行，
-单文件实现），不描述任何未实现的功能。与 `docs/` 目录下早期文档不一致之处，以本手册为准；
+适用范围：本手册内容全部来自对 `opencode_rate_limiter/` 包实际代码的核对，不描述任何未实现的功能。与 `docs/` 目录下早期文档不一致之处，以本手册为准；
 差异清单见文末「实现事实与文档差异」章节。
 
 ---
@@ -42,7 +41,7 @@
 
 ### 特性摘要
 
-- **单文件纯 Python**（`opencode_rate_limiter.py`），Python 3.11+（使用标准库 `tomllib`）
+- **纯 Python 包**（`opencode_rate_limiter/`，13 个职责单一模块），Python 3.11+（使用标准库 `tomllib`）
 - 运行时依赖仅三个：`httpx`、`platformdirs`、`tomli-w`（`tomli-w` 仅 `generate-config`
   写配置时使用，可视为可选）
 - 配置优先级：CLI `--config` > `$OPENCODE_RATE_LIMITER_CONFIG` 环境变量 > 平台配置目录
@@ -55,7 +54,7 @@
 
 ```
 opencode-rate-limiter/
-├── opencode_rate_limiter.py   # 全部实现（单文件）
+├── opencode_rate_limiter/     # 包实现（config / paths / prober / pool / cleanup / daemon / cli 等）
 ├── pyproject.toml             # 依赖、ruff / mypy / pytest 配置、入口点
 ├── README.md                  # 快速开始
 ├── MANUAL.md                  # 本手册
@@ -71,7 +70,7 @@ opencode-rate-limiter/
 │   ├── build_binary.py        # PyInstaller 打包脚本
 │   └── generate_completions.py# 一键重新生成 completion/ 下的补全脚本
 ├── completion/                # bash / zsh / fish 补全脚本（已生成）
-├── tests/                     # pytest 测试（130 个）
+├── tests/                     # pytest 测试（188 个）
 ├── man/opencode-rate-limiter.1
 └── .github/workflows/ci.yml   # CI（含二进制构建与发布 job）
 ```
@@ -82,23 +81,27 @@ opencode-rate-limiter/
 
 ### 2.1 模块总览
 
-单文件内按阶段分区组织（源码行号范围见下表）：
+包结构按职责分模块组织（v0.2.0 起由单文件重构为包，`opencode_rate_limiter/__init__.py`
+统一再导出公共 API）：
 
-| 区段 | 内容 | 源码位置 |
-|------|------|----------|
-| 数据类 | `FREE_MODELS`、`DaemonConfig`、`AccountPoolConfig`、`HeadersConfig`、`CleanupConfig`、`Config` | ~L37–L344 |
-| 路径解析 | `get_opencode_config_dirs()`、`get_opencode_native_cache_dirs()`、`get_opencode_native_state_files()`、`get_opencode_auth_files()`、`get_opencode_version()` | ~L351–L430 |
-| 头部注入 | `HeaderInjector` | ~L438–L474 |
-| 模型探测 | `ProbeResult`、`ModelProber` | ~L482–L600 |
-| 账号池 | `AccountHealth`、`Account`、`AccountPool` | ~L608–L747 |
-| 清理器 | `CleanupResult`、`CleanupManager` | ~L755–L923 |
-| 日志系统 | `JSONFormatter`、`HumanFormatter`、`setup_logging`、`level_from_args` | ~L931–L1008 |
-| CLI | `build_parser()` | ~L1016–L1083 |
-| 命令处理器 | `cmd_quick` … `cmd_generate_task`、`COMMAND_HANDLERS` | ~L1091–L2030 |
-| 守护进程 | `DaemonStatus`、`RateLimiterDaemon`、状态持久化 | ~L1263–L1577 |
-| 服务文件生成 | `generate_systemd_unit` / `generate_launchd_plist` / `generate_task_xml` | ~L1627–L1738 |
-| 补全生成 | `_completion_payload`、`_bash/_zsh/_fish_completion`、`generate_completions` | ~L1745–L2010 |
-| 入口 | `main()` | ~L2044–L2076 |
+| 模块 | 内容 |
+|------|------|
+| `meta` | `__version__` |
+| `paths` | `get_opencode_config_dirs()`、`get_opencode_native_cache_dirs()`、`get_opencode_native_state_files()`、`get_opencode_auth_files()`、`get_opencode_version()`（`OPENCODE_VERSION` 可覆盖） |
+| `config` | `FREE_MODELS`、`DaemonConfig`、`AccountPoolConfig`、`ProberConfig`、`HeadersConfig`、`CleanupConfig`、`Config` |
+| `headers` | `HeaderInjector` |
+| `prober` | `ProbeResult`、`ModelProber` |
+| `pool` | `AccountHealth`、`Account`、`extract_access_token`、`AccountPool` |
+| `cleanup` | `CleanupResult`、`CleanupManager` |
+| `logs` | `JSONFormatter`、`HumanFormatter`、`setup_logging`、`level_from_args` |
+| `parser` | `build_parser()`、`should_print_banner()`、结构化命令清单 |
+| `completions` | `_completion_payload`、`_bash/_zsh/_fish_completion`、`generate_completions` |
+| `daemon` | `DaemonStatus`、`RateLimiterDaemon`、单实例锁、状态持久化 |
+| `service` | `generate_systemd_unit` / `generate_launchd_plist` / `generate_task_xml` |
+| `cli` | `cmd_*` 命令处理器、`COMMAND_HANDLERS`、`main()` |
+
+依赖方向：`cli` → `parser`/`daemon`/`completions`/... 单向依赖，无循环
+（`completions` 只依赖 `parser` 与 `config`）。
 
 ### 2.2 数据流
 
@@ -217,7 +220,7 @@ hy3-free, laguna-s-2.1-free, ling-3.0-flash-fin-free, nemotron-3.5-lightning-fre
 
 ```bash
 uv sync --dev          # 安装全部依赖（含开发依赖、lint、类型检查）
-uv run pytest          # 运行测试（130 个）
+uv run pytest          # 运行测试（188 个）
 uv run opencode-rate-limiter --help   # 临时运行
 ```
 
@@ -393,7 +396,8 @@ opencode-rate-limiter rotate [--strategy round_robin|least_used|health]
 opencode-rate-limiter check [--json]
 ```
 
-- 行为：**无论是否有 `--json`，输出都是 JSON**（两个分支输出相同）。
+- 行为：默认输出**人读摘要**（版本 / 守护进程配置与运行时 / 账号池与健康度 /
+  最近探测结果 / 路径计数）；`--json` 输出完整机器可读报告。
 - 输出结构：
 
 ```jsonc
@@ -910,7 +914,7 @@ opencode-rate-limiter -vv daemon
 ### 11.1 测试
 
 ```bash
-uv run pytest -q        # 130 passed
+uv run pytest -q        # 188 passed
 ```
 
 覆盖：核心清理（dry-run/备份/缓存）、探测（httpx mock 200/429/超时）、账号池读取
@@ -975,6 +979,5 @@ uv run mypy .
 2. **token 解析只认 `access_token` 字段**（顶层或一层嵌套）；OpenCode auth 结构变化时
    需要扩展 `extract_access_token`。
 3. **头模板只支持 `{version}`** 一个占位符。
-4. **`check` 恒为 JSON**：`--json` 对 `check` 无效（两个分支相同，属冗余而非缺陷）。
-5. **探测每次消耗配额**：每次探测约 1 个输出 token；默认 30s 间隔 ≈ 2 RPM/模型，
+4. **探测每次消耗配额**：每次探测约 1 个输出 token；默认 30s 间隔 ≈ 2 RPM/模型，
    低于文档估算的 15–20 RPM 上限，但频繁探测仍会轻微消耗免费额度。

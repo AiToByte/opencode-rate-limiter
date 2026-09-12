@@ -461,7 +461,7 @@ class TestCmdProbeAuth:
 
         from opencode_rate_limiter import cmd_probe
 
-        monkeypatch.setattr("opencode_rate_limiter.get_opencode_version", lambda: "1.0")
+        monkeypatch.setattr("opencode_rate_limiter.cli.get_opencode_version", lambda: "1.0")
         httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
         config = self._make_config(
             accounts=[{"name": "primary", "auth_json": '{"access_token": "tok-1"}'}],
@@ -480,7 +480,7 @@ class TestCmdProbeAuth:
 
         from opencode_rate_limiter import cmd_probe
 
-        monkeypatch.setattr("opencode_rate_limiter.get_opencode_version", lambda: "1.0")
+        monkeypatch.setattr("opencode_rate_limiter.cli.get_opencode_version", lambda: "1.0")
         for _ in range(2):
             httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
         config = self._make_config(
@@ -503,7 +503,7 @@ class TestCmdProbeAuth:
 
         from opencode_rate_limiter import cmd_probe
 
-        monkeypatch.setattr("opencode_rate_limiter.get_opencode_version", lambda: "1.0")
+        monkeypatch.setattr("opencode_rate_limiter.cli.get_opencode_version", lambda: "1.0")
         httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
         config = self._make_config(accounts=[{"name": "a", "auth_json": "{}"}], models=["m1"])
 

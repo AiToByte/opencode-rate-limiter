@@ -591,11 +591,13 @@ class TestQuickDeepSplit:
         (cache_dir / "entry.json").write_text("{}", encoding="utf-8")
 
         monkeypatch.setattr(
-            "opencode_rate_limiter.get_opencode_native_state_files", lambda: [state_file]
+            "opencode_rate_limiter.cleanup.get_opencode_native_state_files", lambda: [state_file]
         )
-        monkeypatch.setattr("opencode_rate_limiter.get_opencode_auth_files", lambda: [auth_file])
         monkeypatch.setattr(
-            "opencode_rate_limiter.get_opencode_native_cache_dirs", lambda: [cache_dir]
+            "opencode_rate_limiter.cleanup.get_opencode_auth_files", lambda: [auth_file]
+        )
+        monkeypatch.setattr(
+            "opencode_rate_limiter.cleanup.get_opencode_native_cache_dirs", lambda: [cache_dir]
         )
         return state_file, auth_file, cache_dir
 
@@ -670,10 +672,9 @@ class TestGenerateConfig:
 
     @pytest.mark.asyncio
     async def test_generate_config_defaults_to_platform_path(self, monkeypatch, tmp_path: Path):
-        import opencode_rate_limiter as mod
-
         monkeypatch.setattr(
-            mod, "_default_config_path_str", lambda: str(tmp_path / "cfg" / "config.toml")
+            "opencode_rate_limiter.cli._default_config_path_str",
+            lambda: str(tmp_path / "cfg" / "config.toml"),
         )
         args = argparse.Namespace(config=None, force=False, json=True)
 
@@ -709,7 +710,9 @@ class TestRotateDryRun:
         auth_target = tmp_path / "opencode" / "auth.json"
         auth_target.parent.mkdir(parents=True, exist_ok=True)
         auth_target.write_text('{"access_token": "old-token"}', encoding="utf-8")
-        monkeypatch.setattr("opencode_rate_limiter.get_opencode_auth_files", lambda: [auth_target])
+        monkeypatch.setattr(
+            "opencode_rate_limiter.cli.get_opencode_auth_files", lambda: [auth_target]
+        )
         return auth_target
 
     @pytest.mark.asyncio

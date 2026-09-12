@@ -5,6 +5,24 @@ All notable changes to opencode-rate-limiter will be documented in this file.
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Added
+
+- **`check` 人读输出**：默认输出摘要（版本、守护进程配置与运行时、账号池与健康度、
+  最近探测结果、路径计数），`--json` 才输出完整 JSON 报告，`--json` 选项自此有意义。
+- **显式构建后端**：`pyproject.toml` 增加 hatchling `[build-system]` 与 wheel 打包配置，
+  包化后 `pip install .` / 构建行为有明确定义。
+
+### Changed
+
+- **架构重构：单文件拆分为包**（~2500 行 → 13 个职责单一模块）。依赖单向：
+  `cli` → `parser` / `daemon` / `completions` / …；`__init__.py` 统一再导出公共 API，
+  `from opencode_rate_limiter import ...` 与入口点 `opencode_rate_limiter:main` 保持不变。
+  模块划分：`meta` / `paths` / `config` / `headers` / `prober` / `pool` / `cleanup` /
+  `logs` / `daemon` / `service` / `parser` / `completions` / `cli`。
+- 测试中对内部函数的 monkeypatch 目标随模块划分更新（patch 使用方模块）。
+
 ## [0.2.0] - 2026-09-12
 
 ### Added

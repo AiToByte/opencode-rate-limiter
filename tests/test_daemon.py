@@ -95,7 +95,7 @@ class TestDaemonMode:
                 self.registered[int(sig)] = callback
 
         fake = FakeLoop()
-        monkeypatch.setattr("opencode_rate_limiter.asyncio.get_running_loop", lambda: fake)
+        monkeypatch.setattr("asyncio.get_running_loop", lambda: fake)
         daemon._install_signal_handlers()
 
         sigint = getattr(signal, "SIGINT", None)
@@ -188,10 +188,12 @@ class TestDaemonMode:
         state_file = tmp_path / "state" / "state.json"
         state_file.parent.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(
-            "opencode_rate_limiter.get_opencode_native_state_files", lambda: [state_file]
+            "opencode_rate_limiter.cleanup.get_opencode_native_state_files", lambda: [state_file]
         )
-        monkeypatch.setattr("opencode_rate_limiter.get_opencode_auth_files", lambda: [])
-        monkeypatch.setattr("opencode_rate_limiter.get_opencode_native_cache_dirs", lambda: [])
+        monkeypatch.setattr("opencode_rate_limiter.cleanup.get_opencode_auth_files", lambda: [])
+        monkeypatch.setattr(
+            "opencode_rate_limiter.cleanup.get_opencode_native_cache_dirs", lambda: []
+        )
 
         state_file.write_text("{}", encoding="utf-8")
         daemon = make_daemon(tmp_path, auto_cleanup=True)
@@ -213,9 +215,13 @@ class TestDaemonMode:
     @pytest.mark.asyncio
     async def test_account_rotation_on_429(self, tmp_path, httpx_mock, monkeypatch):
         """测试 429 触发账号轮换"""
-        monkeypatch.setattr("opencode_rate_limiter.get_opencode_auth_files", lambda: [])
-        monkeypatch.setattr("opencode_rate_limiter.get_opencode_native_cache_dirs", lambda: [])
-        monkeypatch.setattr("opencode_rate_limiter.get_opencode_native_state_files", lambda: [])
+        monkeypatch.setattr("opencode_rate_limiter.cleanup.get_opencode_auth_files", lambda: [])
+        monkeypatch.setattr(
+            "opencode_rate_limiter.cleanup.get_opencode_native_cache_dirs", lambda: []
+        )
+        monkeypatch.setattr(
+            "opencode_rate_limiter.cleanup.get_opencode_native_state_files", lambda: []
+        )
         daemon = make_daemon(
             tmp_path,
             auto_cleanup=False,
@@ -291,20 +297,22 @@ class TestDaemonState:
             ),
             encoding="utf-8",
         )
-        monkeypatch.setattr("opencode_rate_limiter.get_daemon_state_path", lambda: state_path)
+        monkeypatch.setattr(
+            "opencode_rate_limiter.daemon.get_daemon_state_path", lambda: state_path
+        )
 
         rc = await cmd_check(Config(), argparse.Namespace(json=False))
         out = capsys.readouterr().out
 
         assert rc == 0
-        assert '"daemon"' in out
-        assert '"pid": 42' in out
-        assert '"total_cycles": 5' in out
+        assert "Health Check" in out
+        assert "pid 42" in out
+        assert "cycles=5" in out
 
     def test_load_daemon_state_missing(self, monkeypatch, tmp_path):
         """测试状态文件不存在时返回 None"""
         monkeypatch.setattr(
-            "opencode_rate_limiter.get_daemon_state_path", lambda: tmp_path / "nope.json"
+            "opencode_rate_limiter.daemon.get_daemon_state_path", lambda: tmp_path / "nope.json"
         )
         assert load_daemon_state() is None
 
@@ -315,7 +323,7 @@ class TestSystemdIntegration:
     def test_service_file_generation(self, monkeypatch):
         """测试 systemd 服务文件生成"""
         monkeypatch.setattr(
-            "opencode_rate_limiter._resolve_binary",
+            "opencode_rate_limiter.service._resolve_binary",
             lambda: "/usr/bin/opencode-rate-limiter",
         )
         out = generate_systemd_unit()
@@ -326,7 +334,7 @@ class TestSystemdIntegration:
     def test_service_file_content(self, monkeypatch):
         """测试服务文件内容正确性"""
         monkeypatch.setattr(
-            "opencode_rate_limiter._resolve_binary",
+            "opencode_rate_limiter.service._resolve_binary",
             lambda: "/usr/bin/opencode-rate-limiter",
         )
         out = generate_systemd_unit()
@@ -344,7 +352,7 @@ class TestLaunchdIntegration:
     def test_plist_generation(self, monkeypatch):
         """测试 launchd plist 生成"""
         monkeypatch.setattr(
-            "opencode_rate_limiter._resolve_binary",
+            "opencode_rate_limiter.service._resolve_binary",
             lambda: "/opt/homebrew/bin/opencode-rate-limiter",
         )
         out = generate_launchd_plist()
@@ -362,7 +370,7 @@ class TestTaskSchedulerIntegration:
     def test_task_xml_generation(self, monkeypatch):
         """测试任务 XML 生成"""
         monkeypatch.setattr(
-            "opencode_rate_limiter._resolve_binary",
+            "opencode_rate_limiter.service._resolve_binary",
             lambda: "C:\\\\opencode-rate-limiter.exe",
         )
         out = generate_task_xml()
@@ -465,9 +473,13 @@ class TestHealthFeedback:
     @pytest.mark.asyncio
     async def test_rate_limited_marks_failure_once(self, tmp_path, monkeypatch):
         """429 仅标记一次失败（由 _handle_rate_limited 负责）"""
-        monkeypatch.setattr("opencode_rate_limiter.get_opencode_auth_files", lambda: [])
-        monkeypatch.setattr("opencode_rate_limiter.get_opencode_native_cache_dirs", lambda: [])
-        monkeypatch.setattr("opencode_rate_limiter.get_opencode_native_state_files", lambda: [])
+        monkeypatch.setattr("opencode_rate_limiter.cleanup.get_opencode_auth_files", lambda: [])
+        monkeypatch.setattr(
+            "opencode_rate_limiter.cleanup.get_opencode_native_cache_dirs", lambda: []
+        )
+        monkeypatch.setattr(
+            "opencode_rate_limiter.cleanup.get_opencode_native_state_files", lambda: []
+        )
         daemon = make_daemon(
             tmp_path,
             models=["m1"],
@@ -566,15 +578,16 @@ class TestPoolHealthPersistence:
             ),
             encoding="utf-8",
         )
-        monkeypatch.setattr("opencode_rate_limiter.get_daemon_state_path", lambda: state_path)
+        monkeypatch.setattr(
+            "opencode_rate_limiter.daemon.get_daemon_state_path", lambda: state_path
+        )
 
         rc = await cmd_check(Config(), argparse.Namespace(json=False))
         out = capsys.readouterr().out
 
         assert rc == 0
-        assert '"pool_health"' not in out  # 归位到 account_pool.health
-        assert '"health"' in out
-        assert '"score": 0.71' in out
+        assert "account health" in out
+        assert "score=0.71" in out
 
     @pytest.mark.asyncio
     async def test_reload_preserves_account_health(self, tmp_path, monkeypatch):
