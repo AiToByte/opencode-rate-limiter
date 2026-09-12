@@ -30,8 +30,8 @@ uv run opencode-rate-limiter --help
 
 | 命令 | 说明 |
 |------|------|
-| `quick` | 快速解除限流（清理退避锁 + 重置 Token） |
-| `deep` | 深度清理（+ 清除缓存 + 强制重新登录） |
+| `quick` | 快速维护：备份 auth.json（服务端限额无法本地解除） |
+| `deep` | 深度维护：quick + 清缓存 |
 | `probe` | 探测免费模型可用性 |
 | `headers` | 输出官方 CLI 兼容请求头 |
 | `rotate` | 手动轮换账号池 |

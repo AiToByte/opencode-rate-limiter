@@ -39,7 +39,7 @@ class TestConfig:
     def test_load_defaults(self):
         """Default config loads correctly"""
         cfg = Config.load(None)
-        assert cfg.daemon.interval_seconds == 30
+        assert cfg.daemon.interval_seconds == 900
         assert cfg.daemon.probe_timeout_seconds == 10.0
         assert cfg.daemon.auto_cleanup_on_429 is True
         assert "deepseek-v4-flash-free" in cfg.daemon.models
@@ -79,7 +79,7 @@ class TestConfig:
     def test_load_nonexistent_file_returns_defaults(self, tmp_path: Path):
         """Non-existent config file returns defaults"""
         cfg = Config.load(tmp_path / "nonexistent.toml")
-        assert cfg.daemon.interval_seconds == 30
+        assert cfg.daemon.interval_seconds == 900
 
     def test_env_overrides_daemon_interval(self, monkeypatch, sample_toml_config: Path):
         """Environment variable overrides config file"""
@@ -260,7 +260,7 @@ class TestDaemonConfig:
 
     def test_default_values(self):
         cfg = DaemonConfig()
-        assert cfg.interval_seconds == 30
+        assert cfg.interval_seconds == 900
         assert cfg.probe_timeout_seconds == 10.0
         assert cfg.auto_cleanup_on_429 is True
         assert len(cfg.models) == 8
@@ -616,9 +616,6 @@ class TestQuickDeepSplit:
         (cache_dir / "entry.json").write_text("{}", encoding="utf-8")
 
         monkeypatch.setattr(
-            "opencode_rate_limiter.cleanup.get_opencode_native_state_files", lambda: [state_file]
-        )
-        monkeypatch.setattr(
             "opencode_rate_limiter.cleanup.get_opencode_auth_files", lambda: [auth_file]
         )
         monkeypatch.setattr(
@@ -627,39 +624,43 @@ class TestQuickDeepSplit:
         return state_file, auth_file, cache_dir
 
     @pytest.mark.asyncio
-    async def test_quick_keeps_cache(self, tmp_path: Path, monkeypatch, capsys):
-        """quick: clear lock/state + reset token, but keep the cache"""
+    async def test_quick_backs_up_auth_only(self, tmp_path: Path, monkeypatch, capsys):
+        """quick: 仅备份 auth.json，不碰缓存、不清 token、不删任何状态文件"""
         state_file, auth_file, cache_dir = self._setup_targets(tmp_path, monkeypatch)
         args = argparse.Namespace(json=True, dry_run=False)
 
         rc = await cmd_quick(Config(), args)
         assert rc == 0
-        assert not state_file.exists()
-        assert json.loads(auth_file.read_text(encoding="utf-8"))["access_token"] == ""
-        assert (cache_dir / "entry.json").exists()  # cache untouched
+        # 内容原样保留（不再做 token 手术）
+        assert json.loads(auth_file.read_text(encoding="utf-8"))["access_token"] == "tok"
+        assert auth_file.with_suffix(".json.bak").exists()
+        assert state_file.exists()  # 虚构目标不再删除
+        assert (cache_dir / "entry.json").exists()
+        # JSON 输出无 relogin_hint（token 未被清除）
+        out = capsys.readouterr().out
+        assert "relogin_hint" not in out
 
     @pytest.mark.asyncio
     async def test_deep_purges_cache(self, tmp_path: Path, monkeypatch, capsys):
-        """deep: quick profile + cache purge + re-login hint"""
-        state_file, _auth_file, cache_dir = self._setup_targets(tmp_path, monkeypatch)
+        """deep: quick 全部 + 清缓存"""
+        state_file, auth_file, cache_dir = self._setup_targets(tmp_path, monkeypatch)
         args = argparse.Namespace(json=True, dry_run=False)
 
         rc = await cmd_deep(Config(), args)
         assert rc == 0
-        assert not state_file.exists()
         assert not (cache_dir / "entry.json").exists()
-        out = capsys.readouterr().out
-        assert "relogin_hint" in out
+        assert auth_file.with_suffix(".json.bak").exists()
+        assert state_file.exists()
 
     @pytest.mark.asyncio
     async def test_quick_dry_run_touches_nothing(self, tmp_path: Path, monkeypatch):
-        state_file, auth_file, cache_dir = self._setup_targets(tmp_path, monkeypatch)
+        _state_file, auth_file, cache_dir = self._setup_targets(tmp_path, monkeypatch)
         args = argparse.Namespace(json=True, dry_run=True)
 
         rc = await cmd_quick(Config(), args)
         assert rc == 0
-        assert state_file.exists()
         assert json.loads(auth_file.read_text(encoding="utf-8"))["access_token"] == "tok"
+        assert not auth_file.with_suffix(".json.bak").exists()
         assert (cache_dir / "entry.json").exists()
 
 

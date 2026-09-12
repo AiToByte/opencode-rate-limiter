@@ -48,37 +48,46 @@ def _print_cleanup_result(result: CleanupResult) -> None:
     print(f"\nDone: {result.cleared_count} items processed, {len(result.errors)} errors")
 
 
+def _print_quota_notice() -> None:
+    """Honest framing: local operations cannot lift the server-side limit."""
+    reset = ModelProber._estimate_reset(None)
+    print(
+        f"\nNote: the Zen free-tier quota is counted server-side per IP and resets"
+        f" at UTC midnight (in ~{reset // 3600}h {(reset % 3600) // 60}m)."
+    )
+    print("Local operations cannot lift it; this run only backed up auth files.")
+
+
 async def cmd_quick(config: Config, args: argparse.Namespace) -> int:
     log = logging.getLogger("cmd.quick")
-    log.info("Starting quick cleanup", extra={"dry_run": args.dry_run})
+    log.info("Starting quick maintenance", extra={"dry_run": args.dry_run})
 
     cleanup = CleanupManager(config.cleanup)
-    # quick profile: rate-limit locks + state.json + auth token reset, no cache purge
+    # quick profile: back up auth.json, no cache purge, no token surgery
     result = cleanup.full_cleanup(dry_run=args.dry_run, include_cache=False)
 
     if args.json:
         print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
     else:
         _print_cleanup_result(result)
+        _print_quota_notice()
 
     return 0 if not result.errors else 1
 
 
 async def cmd_deep(config: Config, args: argparse.Namespace) -> int:
     log = logging.getLogger("cmd.deep")
-    log.info("Starting deep cleanup", extra={"dry_run": args.dry_run})
+    log.info("Starting deep maintenance", extra={"dry_run": args.dry_run})
 
     cleanup = CleanupManager(config.cleanup)
-    # deep profile: quick + cache purge; tokens are cleared so a re-login is expected
+    # deep profile: auth backups + cache purge (user-configured / native cache dirs)
     result = cleanup.full_cleanup(dry_run=args.dry_run, include_cache=True)
 
     if args.json:
-        data = result.to_dict()
-        data["relogin_hint"] = "run `opencode login` to refresh the cleared tokens"
-        print(json.dumps(data, indent=2, ensure_ascii=False))
+        print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
     else:
         _print_cleanup_result(result)
-        print("\nTokens were cleared - run `opencode login` to authenticate again.")
+        _print_quota_notice()
 
     return 0 if not result.errors else 1
 
@@ -325,6 +334,12 @@ async def cmd_check(config: Config, args: argparse.Namespace) -> int:
     if cooldowns:
         parts = ", ".join(f"{m}={s}s" for m, s in sorted(cooldowns.items()))
         print(f"  cooldowns        : {parts}")
+    usage = daemon_info.get("probe_usage")
+    if isinstance(usage, dict) and usage.get("day"):
+        print(
+            f"  probe budget     : {usage.get('count', 0)}/{config.daemon.daily_probe_budget}"
+            f" used (UTC day {usage['day']})"
+        )
     print(
         f"  account pool     : {pool_info['configured_accounts']} account(s)"
         f" | strategy={pool_info['strategy']}"

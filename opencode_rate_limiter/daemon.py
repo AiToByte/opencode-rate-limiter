@@ -153,6 +153,8 @@ class RateLimiterDaemon:
         self._probe_event = asyncio.Event()
         self._error_streak = 0
         self._cooldowns: dict[str, float] = {}  # model -> monotonic deadline
+        self._probe_day = ""
+        self._probe_count = 0
         self._prev_handlers: dict[int, Any] = {}
         self._signal_fallback_sigs: list[int] = []
         self._rebuild()
@@ -184,8 +186,18 @@ class RateLimiterDaemon:
         if self.status.history.maxlen != size:
             self.status.history = deque(self.status.history, maxlen=size)
 
+    def _load_probe_usage(self) -> None:
+        """Restore the daily probe budget counter across restarts"""
+        state = load_daemon_state(self._state_path)
+        usage = state.get("probe_usage") if state else None
+        if isinstance(usage, dict):
+            self._probe_day = str(usage.get("day", ""))
+            with contextlib.suppress(TypeError, ValueError):
+                self._probe_count = int(usage.get("count", 0))
+
     async def run(self) -> None:
 
+        self._load_probe_usage()
         self._acquire_lock()
         self._install_signal_handlers()
         self._running = True
@@ -297,6 +309,29 @@ class RateLimiterDaemon:
                 },
             )
 
+        # Daily probe budget: every probe consumes the same per-IP free quota
+        # as real usage, so cap total probe requests per UTC day.
+        today = _dt.datetime.now(_dt.UTC).strftime("%Y%m%d")
+        if today != self._probe_day:
+            self._probe_day = today
+            self._probe_count = 0
+        budget = self.config.daemon.daily_probe_budget
+        if budget and self._probe_count >= budget:
+            self.log.warning(
+                "Daily probe budget exhausted; skipping cycle",
+                extra={"budget": budget, "used": self._probe_count},
+            )
+            self._persist_state()
+            return
+        if budget:
+            remaining = budget - self._probe_count
+            if len(active) > remaining:
+                self.log.info(
+                    "Trimming probe batch to daily budget",
+                    extra={"models": len(active), "remaining": remaining},
+                )
+                active = active[:remaining]
+
         self.log.info("Starting probe cycle", extra={"models": len(active)})
 
         # Per-model account rotation: pick an account per model and inject its
@@ -314,6 +349,7 @@ class RateLimiterDaemon:
                     headers_by_model[model] = self.injector.build_headers(token=token)
 
         results = await self.prober.probe_all(active, self.headers, headers_by_model or None)
+        self._probe_count += len(results)
 
         for r in results:
             self.status.model_results[r.model] = r
@@ -402,6 +438,7 @@ class RateLimiterDaemon:
     def _persist_state(self) -> None:
         """Write the current status snapshot to the state file"""
         data = self.status.to_dict()
+        data["probe_usage"] = {"day": self._probe_day, "count": self._probe_count}
         if self._cooldowns:
             now = time.monotonic()
             data["cooldowns"] = {
@@ -536,13 +573,13 @@ def write_daemon_state(data: dict[str, Any], path: Path | None = None) -> None:
         log.debug("Failed to write daemon state: %s", e)
 
 
-def load_daemon_state() -> dict[str, Any] | None:
+def load_daemon_state(path: Path | None = None) -> dict[str, Any] | None:
     """Read the daemon's persisted state file, if present"""
-    path = get_daemon_state_path()
-    if not path.exists():
+    target = path or get_daemon_state_path()
+    if not target.exists():
         return None
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(target, encoding="utf-8") as f:
             return cast("dict[str, Any]", json.load(f))
     except (json.JSONDecodeError, OSError) as e:
         logging.getLogger("main").debug("Failed to read daemon state: %s", e)

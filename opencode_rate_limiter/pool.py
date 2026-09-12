@@ -89,17 +89,23 @@ class Account:
 def extract_access_token(auth: dict[str, Any]) -> str | None:
     """Extract a bearer token from an auth JSON structure
 
-    Looks for a top-level "access_token"; falls back to one nested level deep
-    (e.g. {"opencode": {"access_token": "..."}}).
+    Recognized shapes:
+    - ``{"access_token": "..."}`` (generic)
+    - ``{"access": "..."}`` (opencode OAuth entry: ``{"type": "oauth", ...}``)
+    - provider-keyed maps, one level deep:
+      ``{"https://opencode.ai/zen": {"type": "oauth", "access": "..."}}``
+      or ``{"opencode": {"access_token": "..."}}``
     """
-    token = auth.get("access_token")
-    if isinstance(token, str) and token:
-        return token
+    for key in ("access_token", "access"):
+        token = auth.get(key)
+        if isinstance(token, str) and token:
+            return token
     for value in auth.values():
         if isinstance(value, dict):
-            nested = value.get("access_token")
-            if isinstance(nested, str) and nested:
-                return nested
+            for key in ("access_token", "access"):
+                nested = value.get(key)
+                if isinstance(nested, str) and nested:
+                    return nested
     return None
 
 

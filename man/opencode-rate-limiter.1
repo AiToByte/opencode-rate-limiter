@@ -37,11 +37,11 @@ OpenCode 免费模型限流缓解与账号池管理工具。
 .SH COMMANDS
 .TP
 \fBquick\fR
-快速解除限流：清理本地退避锁 + 重置 Token 节点
+快速维护：备份 auth.json（服务端限额无法本地解除）
 适用于触发 429 后立即恢复使用
 .TP
 \fBdeep\fR
-深度清理：quick + 清除 Context 缓存 + 强制重新登录
+深度维护：quick + 清除缓存目录
 适用于顽固限流或切换账号前
 .TP
 \fBprobe\fR [\fIMODEL\fR]

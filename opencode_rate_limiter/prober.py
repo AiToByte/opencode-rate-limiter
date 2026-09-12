@@ -175,9 +175,15 @@ class ModelProber:
             await client.aclose()
 
     @staticmethod
-    def _estimate_reset(retry_after: int | None) -> int | None:
-        """Estimate reset time when Retry-After header is missing (silent limit)"""
+    def _estimate_reset(retry_after: int | None) -> int:
+        """Seconds until the free-tier quota resets
+
+        The Zen free tier resets daily at UTC midnight (the gateway's
+        FreeUsageLimitError carries a retry-after header of exactly this
+        value); when the header is missing, estimate seconds to UTC midnight.
+        """
         if retry_after is not None:
             return retry_after
-        # Default estimate for silent limit: 60 seconds
-        return 60
+        now = _dt.datetime.now(_dt.UTC)
+        midnight = (now + _dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        return max(1, int((midnight - now).total_seconds()))

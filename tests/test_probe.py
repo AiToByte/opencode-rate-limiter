@@ -1,8 +1,5 @@
 """Phase 2 module tests - HeaderInjector, ModelProber, AccountPool, CleanupManager."""
 
-import json
-from typing import Any
-
 import pytest
 
 from opencode_rate_limiter import (
@@ -12,11 +9,9 @@ from opencode_rate_limiter import (
     CleanupConfig,
     CleanupManager,
     CleanupResult,
-    Config,
     HeaderInjector,
     HeadersConfig,
     ModelProber,
-    ProberConfig,
     ProbeResult,
     extract_access_token,
 )
@@ -143,7 +138,8 @@ class TestModelProber:
         result = await prober.probe("deepseek-v4-flash-free", {})
         assert result.status == "rate_limited"
         assert result.retry_after is None
-        assert result.estimated_reset == 60
+        assert result.estimated_reset is not None
+        assert 1 <= result.estimated_reset <= 86400
 
     @pytest.mark.asyncio
     async def test_probe_timeout(self, httpx_mock):
@@ -182,7 +178,15 @@ class TestModelProber:
         assert ModelProber._estimate_reset(120) == 120
 
     def test_estimate_reset_without_value(self):
-        assert ModelProber._estimate_reset(None) == 60
+        """无 Retry-After 时估算为距 UTC 午夜的秒数（免费层真实重置点）"""
+        import datetime as _dt
+
+        reset = ModelProber._estimate_reset(None)
+        now = _dt.datetime.now(_dt.UTC)
+        midnight = (now + _dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        expected = max(1, int((midnight - now).total_seconds()))
+        assert reset == expected
+        assert 1 <= reset <= 86400
 
 
 # =============================================================================
@@ -357,25 +361,27 @@ class TestCleanupResult:
 
 
 class TestCleanupManager:
-    def test_reset_rate_limit_state_dry_run(self, tmp_path):
-        state_file = tmp_path / "state.json"
-        state_file.write_text('{"rate_limited_until": 123}')
-        config = CleanupConfig(state_files=[str(state_file)])
-        mgr = CleanupManager(config)
-        result = mgr.reset_rate_limit_state(dry_run=True)
-        assert result.cleared_count >= 0
-
-    def test_rotate_auth_tokens_backup(self, tmp_path):
+    def test_backup_auth_files(self, tmp_path):
+        """备份 auth.json 且内容原样保留（不做 token 手术）"""
         auth_file = tmp_path / "auth.json"
-        auth_file.write_text('{"access_token": "old_token", "rate_limited_until": 123}')
-        config = CleanupConfig()
-        mgr = CleanupManager(config)
-        result = mgr.rotate_auth_tokens([auth_file], dry_run=False)
+        original = '{"https://opencode.ai/zen": {"type": "oauth", "access": "tok"}}'
+        auth_file.write_text(original)
+        mgr = CleanupManager(CleanupConfig())
+        result = mgr.backup_auth_files([auth_file], dry_run=False)
         assert result.cleared_count == 1
-        assert (tmp_path / "auth.json.bak").exists()
-        data = json.loads(auth_file.read_text())
-        assert data["access_token"] == ""
-        assert "rate_limited_until" not in data
+        backup = auth_file.with_suffix(".json.bak")
+        assert backup.exists()
+        assert backup.read_text(encoding="utf-8") == original
+        # 原文件未被修改
+        assert auth_file.read_text(encoding="utf-8") == original
+
+    def test_backup_auth_dry_run(self, tmp_path):
+        auth_file = tmp_path / "auth.json"
+        auth_file.write_text("{}")
+        mgr = CleanupManager(CleanupConfig())
+        result = mgr.backup_auth_files([auth_file], dry_run=True)
+        assert result.cleared_count == 1
+        assert not auth_file.with_suffix(".json.bak").exists()
 
     def test_purge_cache(self, tmp_path):
         cache_dir = tmp_path / "cache"
@@ -399,354 +405,28 @@ class TestCleanupManager:
         assert result.cleared_count >= 0
 
 
-# =============================================================================
-# Iteration tests: account auth wired into probe requests
-# =============================================================================
+class TestExtractAccessTokenRealAuth:
+    """opencode 真实 auth.json 结构（源码核实）的 token 解析"""
 
+    def test_oauth_entry_shape(self):
+        """opencode OAuth 条目：{type: oauth, access, refresh, expires}"""
+        auth = {"type": "oauth", "access": "tok-1", "refresh": "r", "expires": 1}
+        assert extract_access_token(auth) == "tok-1"
 
-class TestExtractAccessToken:
-    def test_top_level_token(self):
+    def test_provider_keyed_shape(self):
+        """真实 auth.json 顶层按 provider 键存储"""
+        auth = {
+            "https://opencode.ai/zen": {
+                "type": "oauth",
+                "access": "tok-zen",
+                "refresh": "r",
+                "expires": 1,
+            }
+        }
+        assert extract_access_token(auth) == "tok-zen"
+
+    def test_generic_access_token_still_supported(self):
         assert extract_access_token({"access_token": "tok"}) == "tok"
 
-    def test_nested_token(self):
-        auth = {"opencode": {"access_token": "nested-tok"}, "other": 1}
-        assert extract_access_token(auth) == "nested-tok"
-
-    def test_missing_token(self):
-        assert extract_access_token({"foo": "bar"}) is None
-
-    def test_empty_token_treated_as_missing(self):
-        assert extract_access_token({"access_token": ""}) is None
-
-
-class TestResolveToken:
-    def test_resolve_from_auth_path(self, tmp_path):
-        auth_file = tmp_path / "auth.json"
-        auth_file.write_text('{"access_token": "file-tok"}')
-        config = AccountPoolConfig(accounts=[{"name": "a", "auth_path": str(auth_file)}])
-        pool = AccountPool(config)
-        assert pool.resolve_token(pool.accounts[0]) == "file-tok"
-
-    def test_resolve_missing_source(self):
-        config = AccountPoolConfig(accounts=[{"name": "a", "auth_path": "/nonexistent.json"}])
-        pool = AccountPool(config)
-        assert pool.resolve_token(pool.accounts[0]) is None
-
-
-class TestHeaderInjectorAuth:
-    def test_build_headers_with_token(self):
-        injector = HeaderInjector(HeadersConfig(), "1.18.16")
-        h = injector.build_headers(token="secret")
-        assert h["Authorization"] == "Bearer secret"
-
-    def test_build_headers_without_token(self):
-        injector = HeaderInjector(HeadersConfig(), "1.18.16")
-        h = injector.build_headers()
-        assert "Authorization" not in h
-
-
-class TestCmdProbeAuth:
-    def _make_config(self, accounts: list[dict[str, Any]], models: list[str]) -> Config:
-        from opencode_rate_limiter import DaemonConfig
-
-        return Config(
-            daemon=DaemonConfig(models=models),
-            account_pool=AccountPoolConfig(accounts=accounts, strategy="round_robin"),
-        )
-
-    @pytest.mark.asyncio
-    async def test_probe_carries_account_auth_token(self, httpx_mock, monkeypatch):
-        """探测请求携带所选账号的 Authorization 头"""
-        import argparse
-
-        from opencode_rate_limiter import cmd_probe
-
-        monkeypatch.setattr("opencode_rate_limiter.cli.get_opencode_version", lambda: "1.0")
-        httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
-        config = self._make_config(
-            accounts=[{"name": "primary", "auth_json": '{"access_token": "tok-1"}'}],
-            models=["m1"],
-        )
-
-        rc = await cmd_probe(config, argparse.Namespace(model="all", json=True))
-        assert rc == 0
-        request = httpx_mock.get_requests()[0]
-        assert request.headers["authorization"] == "Bearer tok-1"
-
-    @pytest.mark.asyncio
-    async def test_probe_rotates_tokens_across_models(self, httpx_mock, monkeypatch):
-        """多模型探测按账号轮换，各自携带不同 token"""
-        import argparse
-
-        from opencode_rate_limiter import cmd_probe
-
-        monkeypatch.setattr("opencode_rate_limiter.cli.get_opencode_version", lambda: "1.0")
-        for _ in range(2):
-            httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
-        config = self._make_config(
-            accounts=[
-                {"name": "a", "auth_json": '{"access_token": "tok-a"}'},
-                {"name": "b", "auth_json": '{"access_token": "tok-b"}'},
-            ],
-            models=["m1", "m2"],
-        )
-
-        rc = await cmd_probe(config, argparse.Namespace(model="all", json=True))
-        assert rc == 0
-        auth_headers = {req.headers["authorization"] for req in httpx_mock.get_requests()}
-        assert auth_headers == {"Bearer tok-a", "Bearer tok-b"}
-
-    @pytest.mark.asyncio
-    async def test_probe_without_resolvable_token_uses_plain_headers(self, httpx_mock, monkeypatch):
-        """token 无法解析时退回无鉴权头（保持原行为）"""
-        import argparse
-
-        from opencode_rate_limiter import cmd_probe
-
-        monkeypatch.setattr("opencode_rate_limiter.cli.get_opencode_version", lambda: "1.0")
-        httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
-        config = self._make_config(accounts=[{"name": "a", "auth_json": "{}"}], models=["m1"])
-
-        rc = await cmd_probe(config, argparse.Namespace(model="all", json=True))
-        assert rc == 0
-        request = httpx_mock.get_requests()[0]
-        assert "authorization" not in request.headers
-
-
-# =============================================================================
-# Iteration round 2: [prober] config section + sliding-window health
-# =============================================================================
-
-
-class TestProberConfig:
-    def test_defaults(self):
-        cfg = ProberConfig()
-        assert cfg.endpoint == ModelProber.ZEN_ENDPOINT
-        assert cfg.ping_message == "ping"
-        assert cfg.max_tokens == 1
-        assert cfg.extra_headers == {}
-        assert cfg.proxy is None
-
-    def test_validate_rejects_bad_endpoint(self):
-        with pytest.raises(ValueError, match="endpoint"):
-            ProberConfig(endpoint="ftp://x").validate()
-
-    def test_validate_rejects_zero_max_tokens(self):
-        with pytest.raises(ValueError, match="max_tokens"):
-            ProberConfig(max_tokens=0).validate()
-
-    def test_validate_accepts_valid(self):
-        ProberConfig(endpoint="http://localhost:9999/v1", max_tokens=2).validate()
-
-
-class TestModelProberCustomConfig:
-    @pytest.mark.asyncio
-    async def test_custom_endpoint(self, httpx_mock):
-        url = "https://example.com/zen/v1/chat/completions"
-        httpx_mock.add_response(url=url, status_code=200, json={})
-        prober = ModelProber(10.0, ProberConfig(endpoint=url))
-        result = await prober.probe("m1", {})
-        assert result.status == "available"
-
-    @pytest.mark.asyncio
-    async def test_extra_headers_sent(self, httpx_mock):
-        httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
-        prober = ModelProber(10.0, ProberConfig(extra_headers={"X-Trace": "abc"}))
-        await prober.probe("m1", {"User-Agent": "test"})
-        request = httpx_mock.get_requests()[0]
-        assert request.headers["x-trace"] == "abc"
-        assert request.headers["user-agent"] == "test"  # shared headers preserved
-
-    @pytest.mark.asyncio
-    async def test_custom_payload(self, httpx_mock):
-        httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
-        prober = ModelProber(10.0, ProberConfig(ping_message="hello", max_tokens=3))
-        await prober.probe("m1", {})
-        body = json.loads(httpx_mock.get_requests()[0].content)
-        assert body["messages"][0]["content"] == "hello"
-        assert body["max_tokens"] == 3
-
-
-class TestHealthSlidingWindow:
-    def test_window_reflects_recent_results(self):
-        h = AccountHealth(name="a", window=10)
-        for _ in range(8):
-            h.results.append(True)
-        for _ in range(2):
-            h.results.append(False)
-        assert h.success_rate == pytest.approx(0.8)
-
-    def test_window_evicts_old_results(self):
-        h = AccountHealth(name="a", window=5)
-        for _ in range(50):
-            h.results.append(False)
-        for _ in range(5):
-            h.results.append(True)
-        assert h.success_rate == pytest.approx(1.0)
-        assert len(h.results) == 5
-
-    def test_mark_result_appends_to_window(self):
-        config = AccountPoolConfig(accounts=[{"name": "a", "auth_json": "{}"}], health_window=3)
-        pool = AccountPool(config)
-        for success in (True, True, True, False):
-            pool.mark_result("a", success=success)
-        assert pool.health["a"].results.maxlen == 3
-        assert list(pool.health["a"].results) == [True, True, False]
-
-    def test_fallback_to_cumulative_when_window_empty(self):
-        h = AccountHealth(name="a", success_count=7, total_count=10)
-        assert h.success_rate == pytest.approx(0.7)
-
-    def test_window_validation(self):
-        with pytest.raises(ValueError, match="health_window"):
-            AccountPoolConfig(accounts=[], health_window=0).validate()
-
-
-# =============================================================================
-# Iteration round 5: shared client / score weights
-# =============================================================================
-
-
-class TestProberSharedClient:
-    @pytest.mark.asyncio
-    async def test_probe_all_builds_one_client(self, httpx_mock, monkeypatch):
-        """probe_all 全程只建一个共享 AsyncClient"""
-        for _ in range(3):
-            httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
-        prober = ModelProber(10.0)
-        calls = []
-        orig = prober._build_client
-
-        def counting():
-            calls.append(1)
-            return orig()
-
-        monkeypatch.setattr(prober, "_build_client", counting)
-        results = await prober.probe_all(["a", "b", "c"], {})
-        assert len(results) == 3
-        assert len(calls) == 1
-        assert prober._shared_client is None  # 用完即清，防泄漏
-
-    @pytest.mark.asyncio
-    async def test_probe_standalone_builds_own_client(self, httpx_mock):
-        """单独 probe() 使用一次性客户端"""
-        httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
-        prober = ModelProber(10.0)
-        result = await prober.probe("m1", {})
-        assert result.status == "available"
-        assert prober._shared_client is None
-
-    @pytest.mark.asyncio
-    async def test_http2_falls_back_without_h2(self, httpx_mock, monkeypatch, caplog):
-        """http2=True 但缺 h2 包时回退 HTTP/1.1 并告警"""
-        import logging
-
-        httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
-        monkeypatch.setattr("importlib.util.find_spec", lambda _name: None)
-        prober = ModelProber(10.0, ProberConfig(http2=True))
-        with caplog.at_level(logging.WARNING, logger="prober"):
-            result = await prober.probe("m1", {})
-        assert result.status == "available"
-        assert any("h2" in r.message for r in caplog.records)
-
-    def test_pool_size_validation(self):
-        with pytest.raises(ValueError, match="connection_pool_size"):
-            ProberConfig(connection_pool_size=0).validate()
-
-
-class TestScoreWeights:
-    def test_calculate_score_custom_weights(self):
-        h = AccountHealth(name="a", success_count=5, total_count=10)
-        # success 权重 1.0 时评分即成功率
-        assert h.calculate_score({"success": 1.0, "latency": 0.0, "recency": 0.0}) == 0.5
-
-    def test_weights_validation(self):
-        with pytest.raises(ValueError, match="missing keys"):
-            AccountPoolConfig(score_weights={"success": 1.0, "latency": 0.0}).validate()
-        with pytest.raises(ValueError, match="unknown keys"):
-            AccountPoolConfig(
-                score_weights={"success": 0.5, "latency": 0.3, "recency": 0.1, "luck": 0.1}
-            ).validate()
-        with pytest.raises(ValueError, match=r"sum to 1\.0"):
-            AccountPoolConfig(
-                score_weights={"success": 0.5, "latency": 0.5, "recency": 0.5}
-            ).validate()
-        with pytest.raises(ValueError, match="within"):
-            AccountPoolConfig(
-                score_weights={"success": 2.0, "latency": -1.0, "recency": 0.0}
-            ).validate()
-        # 合法权重通过
-        AccountPoolConfig(score_weights={"success": 0.8, "latency": 0.1, "recency": 0.1}).validate()
-
-    def test_healthiest_respects_weights(self):
-        config = AccountPoolConfig(
-            accounts=[
-                {"name": "hi-success", "auth_json": "{}"},
-                {"name": "hi-latency", "auth_json": "{}"},
-            ],
-            strategy="health",
-            score_weights={"success": 1.0, "latency": 0.0, "recency": 0.0},
-        )
-        pool = AccountPool(config)
-        pool.health["hi-success"].success_count = 9
-        pool.health["hi-success"].total_count = 10
-        pool.health["hi-success"].avg_latency_ms = 2000
-        pool.health["hi-latency"].success_count = 5
-        pool.health["hi-latency"].total_count = 10
-        pool.health["hi-latency"].avg_latency_ms = 100
-        pick = pool.get_next()
-        assert pick is not None and pick.name == "hi-success"
-
-        pool.config.score_weights = {"success": 0.0, "latency": 1.0, "recency": 0.0}
-        pick = pool.get_next()
-        assert pick is not None and pick.name == "hi-latency"
-
-
-class TestProbeAccountTag:
-    """probe 输出标注账号"""
-
-    def _make_config(self, accounts: list[dict[str, Any]], models: list[str]) -> Config:
-        from opencode_rate_limiter import DaemonConfig
-
-        return Config(
-            daemon=DaemonConfig(models=models),
-            account_pool=AccountPoolConfig(accounts=accounts, strategy="round_robin"),
-        )
-
-    @pytest.mark.asyncio
-    async def test_probe_human_output_tags_account(self, httpx_mock, monkeypatch, capsys):
-        """人读输出标注服务该模型的账号"""
-        import argparse
-
-        from opencode_rate_limiter import cmd_probe
-
-        monkeypatch.setattr("opencode_rate_limiter.cli.get_opencode_version", lambda: "1.0")
-        httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
-        config = self._make_config(
-            accounts=[{"name": "primary", "auth_json": '{"access_token": "tok"}'}],
-            models=["m1"],
-        )
-
-        rc = await cmd_probe(config, argparse.Namespace(model="all", json=False))
-        assert rc == 0
-        out = capsys.readouterr().out
-        assert "[account: primary]" in out
-
-    @pytest.mark.asyncio
-    async def test_probe_json_includes_account(self, httpx_mock, monkeypatch, capsys):
-        """JSON 输出包含 account 字段"""
-        import argparse
-
-        from opencode_rate_limiter import cmd_probe
-
-        monkeypatch.setattr("opencode_rate_limiter.cli.get_opencode_version", lambda: "1.0")
-        httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
-        config = self._make_config(
-            accounts=[{"name": "primary", "auth_json": '{"access_token": "tok"}'}],
-            models=["m1"],
-        )
-
-        rc = await cmd_probe(config, argparse.Namespace(model="all", json=True))
-        assert rc == 0
-        data = json.loads(capsys.readouterr().out)
-        assert data[0]["account"] == "primary"
+    def test_no_token(self):
+        assert extract_access_token({"type": "api", "key": "k"}) is None

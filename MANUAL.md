@@ -34,10 +34,14 @@
 | 头部注入 | 生成与官方 CLI 一致的请求头（User-Agent / x-opencode-client / x-opencode-version），并导出为环境变量或 curl 参数 |
 | 模型探测 | 并发向 Zen 端点发送「ping」探测，判断每个免费模型当前是否可用 / 被限流 / 出错 |
 | 账号池轮换 | 维护多账号健康度（成功率 / 延迟 / 最近错误），支持三种选取策略 |
-| 本地清理 | 删除 OpenCode 本地限流锁、重置 `state.json`、备份并清空 `auth.json` 中的 token、清空缓存目录 |
+| 本地维护 | 备份 auth.json（内容不变）、清空缓存目录。**注意：服务端按 IP/UTC 日计数，本地操作不能解除限额** |
 
-另提供守护进程模式（周期探测 + 429 自动清理/轮换 + 信号控制）和三端服务文件生成
+另提供守护进程模式（周期探测 + 429 冷却/预算控制 + 信号控制）和三端服务文件生成
 （systemd / launchd / Windows 任务计划），以及 bash/zsh/fish 补全脚本生成。
+
+> **定位说明（2026-09 源码核实）**：Zen 免费层限额在服务端按 IP/UTC 日计数（Redis），
+> 本工具**不能解除服务端限额**；它的价值在于探测可观测、冷却与预算控制（不浪费
+> 配额）以及多 key（付费/BYOK）场景下的轮换管理。详见附录 A。
 
 ### 特性摘要
 
@@ -158,9 +162,11 @@ opencode-rate-limiter/
 - `[prober].extra_headers` 会合并进每次探测请求头（同名键覆盖共享头）；
   `[prober].proxy` 传给 httpx（`proxy=` 参数，需 httpx ≥ 0.28），缺省遵循
   `HTTP_PROXY`/`HTTPS_PROXY` 环境变量。
-- 判定：200 → `available`；429 → `rate_limited`（读取 `Retry-After`，缺失时 `estimated_reset`
-  按 60 秒估算——即「静默限流」）；其他状态码 → `error`（`error="HTTP xxx"`）；超时 → `error
-  (timeout)`；未知异常 → `error(<异常文本>)`。空模型列表时 `probe_all` 立即返回空列表。
+- 判定：200 → `available`；429 → `rate_limited`（优先读取响应的 `Retry-After` 头——Zen
+  网关的 429 确实携带该头，值为距 UTC 午夜的秒数；缺失时 `estimated_reset` 估算为
+  距 UTC 午夜的秒数，与网关的重置点一致）；其他状态码 → `error`（`error="HTTP xxx"`）；
+  超时 → `error (timeout)`；未知异常 → `error(<异常文本>)`。空模型列表时 `probe_all`
+  立即返回空列表（不建立连接）。
 - `probe_all(models, headers, headers_by_model)` 支持按模型覆盖请求头——`probe`/`daemon`
   用它实现按账号注入 `Authorization`（见下）。
 - **共享连接池**：一轮 `probe_all` 全程复用同一个 `httpx.AsyncClient`
@@ -188,17 +194,14 @@ opencode-rate-limiter/
   探测结果，`success_rate` 优先取窗口内成功率，窗口为空时回退累计计数；延迟仍为
   指数移动平均（新结果权重 0.2）。
 
-**CleanupManager（清理器）**
-- `reset_rate_limit_state()`：对每个目标状态文件，删除其父目录下 `*rate_limit*.json` 锁文件，
-  并删除 `state.json` 本身。
-- `rotate_auth_tokens()`：先把 auth.json 备份为 `<同名>.json.bak`，然后清空
-  `access_token` 字段、删除 `rate_limited_until` 字段（保留其余内容，缩进 2 写回）。
-  文件内容非法 JSON 时直接删除该文件。
+**CleanupManager（auth 备份与缓存维护）**
+> 早期版本会删除「限流锁文件 / state.json / auth 内 token 字段」——经 opencode 源码
+> 核实，这些目标**并不存在**（opencode CLI 无本地限流状态，auth.json 中也没有
+> `access_token`/`rate_limited_until` 字段），相关操作已移除。
+- `backup_auth_files()`：把 auth.json 原样备份为 `<同名>.json.bak`，**不修改内容**。
 - `purge_cache()`：递归删除缓存目录内容后**重建同名空目录**。
-- `full_cleanup(dry_run, include_cache=True)`：依次执行上述三项并汇总
-  `cleared_count` / `errors` / `details`；`include_cache=False` 跳过清缓存
-  （`quick` 命令即用此档位）。
-- 所有方法支持 `dry_run`：只计数（记为 `cleared_count`）不真正修改。
+- `full_cleanup(dry_run, include_cache=True)`：备份 +（可选）清缓存并汇总结果；
+  `include_cache=False` 即 `quick` 档位。两者均不影响服务端配额。
 
 **RateLimiterDaemon（守护进程）**
 - 构造时 `_rebuild()` 组装 injector / prober / cleanup / pool（账号池为空则 `None`）。
@@ -271,14 +274,15 @@ opencode-rate-limiter --version
   `daemon`）打印横幅，除非指定 `--json`。
 - 从属参数：`probe` 的 `--model`… 见各命令。
 
-### 4.2 `quick` —— 快速解除限流
+### 4.2 `quick` —— 快速维护（auth 备份）
 
 ```
 opencode-rate-limiter quick [--json] [--dry-run]
 ```
 
-- 行为：执行 `full_cleanup(include_cache=False)` —— 删除限流锁文件 + 重置 state.json +
-  备份/清空 auth token。**不清缓存**（与 `deep` 的区别）。
+- 行为：执行 `full_cleanup(include_cache=False)` —— **仅备份 auth.json**（`.json.bak`，
+  内容不变）。不清缓存、不清 token。
+- 诚实声明：输出会附带配额提示——服务端按 IP/UTC 日计数，本地操作不能解除限流。
 - 人类可读输出：逐条打印 `details`（`  <详情>`），错误打印 `  ERROR: <错误>`，末尾
   `Done: <N> items processed, <M> errors`。
 - `--json` 输出：`{"cleared_count": N, "errors": [...], "details": [...]}`。
@@ -298,8 +302,8 @@ opencode-rate-limiter deep [--json] [--dry-run]
 ```
 
 - 行为：`quick` 的全部操作 **+ 清空缓存目录**（`full_cleanup(include_cache=True)`）。
-  token 被清空后需要重新登录：人类可读输出末尾会提示运行 `opencode login`；
-  `--json` 输出额外包含 `"relogin_hint"` 字段。
+  token 不会被清除（早期版本会清空 token 迫使重新登录——该操作已移除，它对服务端
+  限额无效且会登出用户）。
 
 ### 4.4 `probe` —— 探测模型可用性
 
@@ -584,7 +588,8 @@ preserve_config = true         # 必须为 true（校验强制）
 
 | 字段 | 类型 | 默认 | 校验 |
 |------|------|------|------|
-| `interval_seconds` | int | 30 | ≥ 5 |
+| `interval_seconds` | int | 900 | ≥ 5（探测与真实用量共享每日 IP 配额，默认刻意保守） |
+| `daily_probe_budget` | int | 200 | ≥ 0；每 UTC 日探测请求总数硬上限，0 = 不限 |
 | `models` | list[str] | `FREE_MODELS`（8 个） | 非空 |
 | `probe_timeout_seconds` | float | 10.0 | > 0 |
 | `auto_cleanup_on_429` | bool | true | - |
@@ -761,6 +766,7 @@ total_cycles / total_cleanups / models(按名排序的探测结果)
 pool_health(账号健康快照: success / total / consecutive_failures / avg_latency_ms / score)
 history(探测历史环形缓冲: [{ts, models: {模型: 状态}}]，最多 history_size 条)
 cooldowns(模型 → 剩余冷却秒数，仅内存状态，重启后清零)
+probe_usage({day, count}——每日探测预算计数，跨重启恢复)
 pid / updated_at
 ```
 
@@ -913,7 +919,7 @@ opencode-rate-limiter check --json | jq .
 | 配置不生效 | 确认文件在 `--config` 指定路径或平台配置目录；`check --json` 看 `daemon.interval_seconds` 等实际值 |
 | 版本号不符 | `opencode` 需在 PATH；版本检测失败会回退 `unknown`（头部模板插入 `unknown`）；可用 `OPENCODE_VERSION=xxx` 覆盖 |
 | 探测全 error(timeout) | 网络问题；配置 `[prober].proxy` 或标准 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量，或调大 `probe_timeout_seconds` |
-| 探测出现 429 | 服务端限流；等待 `estimated_reset`（缺失时估算 60s）；`quick` 清本地悬挂；开守护进程自动清理 |
+| 探测出现 429 | 服务端按 IP 计数的每日配额用尽（UTC 午夜重置）；`estimated_reset` 即冷却秒数；本地操作无法解除 |
 | 本地总提示限流 | 服务端冷却未结束，本地清理只解除本地挂起；等待 1–5 分钟 |
 | `rotate` 无账号 | `[account_pool]` 未配置或账号缺 `name`/认证来源；`check --json` 看 `configured_accounts` |
 | `check --json` 没有文件输出 | 结构化命令不打印横幅是正常行为，输出即为 JSON |
@@ -1001,5 +1007,35 @@ uv run mypy .
 2. **token 解析只认 `access_token` 字段**（顶层或一层嵌套）；OpenCode auth 结构变化时
    需要扩展 `extract_access_token`。
 3. **头模板只支持 `{version}`** 一个占位符。
-4. **探测每次消耗配额**：每次探测约 1 个输出 token；默认 30s 间隔 ≈ 2 RPM/模型，
-   低于文档估算的 15–20 RPM 上限，但频繁探测仍会轻微消耗免费额度。
+4. **探测与真实用量共享每日 IP 配额**：网关按请求数（而非 token 数）对免费层计费，
+   每次探测都计入同一 IP 的每日额度。默认 `daily_probe_budget=200` 硬上限 +
+   900s 间隔即是为此；调高预算等于挤占真实使用额度。
+
+---
+
+## 附录 A：OpenCode Zen 限额机制（源码核实，2026-09）
+
+以下结论来自 opencode 仓库 `packages/console/app/src/routes/zen/` 网关源码（dev 分支），
+非猜测。限流状态全部存服务端（Redis / MySQL），**本地不存在任何可清除的限流状态**。
+
+| 层 | 限流器 | 键 | 窗口 | 说明 |
+|----|--------|----|------|------|
+| 1 | `ipRateLimiter`（免费层核心） | IP（`x-real-ip`；IPv6 取前 4 段） | UTC 自然日 | 每日请求数（数值在部署配置 `ZEN_LIMITS`，社区实测约 200–600/天）；新 IP 前 7 天额度 ×2；特定模型可配独立日桶 |
+| 2 | `keyRateLimiter` | Zen API key + 模型 | 每分钟 | 默认 1000 RPM/key（付费路径） |
+| 3 | `trialLimiter` | IP（数据库累计） | 长期 | 试用 provider 的 token 预算 |
+| 4 | `modelTpmLimiter` | 模型（全体用户共享） | 每分钟 | 输入 token 总量；撞上属全局拥堵，等即可 |
+| 5 | 订阅/余额 | 账号 | 5h/周/月 | Go/订阅计费路径 |
+
+关键事实：
+
+1. **官方客户端头检查当前被网关注释禁用**（`headersExist = true` 硬编码），头信息仅用于
+   打点。`HeaderInjector` 保留为机制回归时的低成本保险。
+2. **429 响应携带 `retry-after` 头**，值 = 距 UTC 午夜的秒数（免费层）；本工具的冷却期
+   直接采用该值。
+3. **opencode CLI 无本地限流状态**：不存在 `state.json`、`rate_limited_until`、
+   `*rate_limit*.json`；auth.json 结构为 `{provider: {type: "oauth", access, refresh,
+   expires}}` 或 `{type: "api", key}`。
+4. **探测请求计入同一 IP 的每日配额**——守护进程默认 900s 间隔 + 每日 200 次预算，
+   即为此设计的止血措施。
+5. 真正能提高可用量的只有：等待 UTC 午夜重置、更换出口 IP（注意 IPv6 /64 粒度）、
+   付费 Zen key / BYOK。多账号在同 IP 下对免费层**无效**；账号池仅对付费 key 维度有意义。

@@ -7,6 +7,28 @@ All notable changes to opencode-rate-limiter will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **每日探测预算**：`[daemon].daily_probe_budget`（默认 200 次/UTC 日，0 = 不限）——
+  网关按请求数对免费层计 IP 配额，探测与真实用量共享额度；预算跨重启持久化，
+  耗尽后跳过探测周期并在 `check` 中显示用量。
+- **探测间隔默认 900s**（原 30s）：与预算同为「探测不挤占真实用量」的止血措施。
+- **`estimated_reset` 对齐真实重置点**：无 `Retry-After` 头时估算为距 UTC 午夜的秒数
+  （Zen 免费层 429 实际携带 `retry-after` 头，值即距 UTC 午夜秒数；冷却期随之对齐）。
+- **auth 真实结构适配**：`extract_access_token` 现支持 opencode 实际的
+  `{type: "oauth", access}` 条目与按 provider 键存储的嵌套结构（源码核实）。
+
+### Changed
+
+- **清理功能诚实化（破坏性）**：经 opencode 源码核实，早期清理的三个目标——限流锁
+  `*rate_limit*.json`、`state.json`、auth 内 `access_token`/`rate_limited_until` 字段——
+  在 opencode 中**并不存在**（CLI 无本地限流状态），相关删除/字段手术全部移除。
+  `quick` 现为「备份 auth.json + 配额提示」；`deep` 为「备份 + 清缓存」；
+  `rotate_auth_tokens` 更名为 `backup_auth_files`（纯备份，内容不变）。
+  本地操作不能解除服务端限额，工具定位调整为「额度监测与使用优化」。
+- MANUAL 新增附录 A（Zen 限额机制源码核实），并修正「静默限流无 Retry-After」、
+  「本地退避锁」等与源码不符的历史结论。
+
 ### Fixed
 
 - **PyInstaller 构建脚本适配包结构**：`scripts/build_binary.py` 仍指向已删除的单文件

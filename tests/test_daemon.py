@@ -185,18 +185,11 @@ class TestDaemonMode:
 
     @pytest.mark.asyncio
     async def test_auto_cleanup_trigger(self, tmp_path, httpx_mock, monkeypatch):
-        """测试 429 触发自动清理"""
-        state_file = tmp_path / "state" / "state.json"
-        state_file.parent.mkdir(parents=True, exist_ok=True)
-        monkeypatch.setattr(
-            "opencode_rate_limiter.cleanup.get_opencode_native_state_files", lambda: [state_file]
-        )
+        """测试 429 触发自动清理（清理 = auth 备份 + 缓存维护）"""
         monkeypatch.setattr("opencode_rate_limiter.cleanup.get_opencode_auth_files", lambda: [])
         monkeypatch.setattr(
             "opencode_rate_limiter.cleanup.get_opencode_native_cache_dirs", lambda: []
         )
-
-        state_file.write_text("{}", encoding="utf-8")
         daemon = make_daemon(tmp_path, auto_cleanup=True)
         httpx_mock.add_response(
             url=ModelProber.ZEN_ENDPOINT,
@@ -206,7 +199,6 @@ class TestDaemonMode:
 
         await daemon._probe_cycle()
 
-        assert not state_file.exists()
         assert daemon.status.total_cleanups == 1
         assert daemon.status.last_cleanup != ""
         result = daemon.status.model_results["deepseek-v4-flash-free"]
@@ -216,13 +208,6 @@ class TestDaemonMode:
     @pytest.mark.asyncio
     async def test_account_rotation_on_429(self, tmp_path, httpx_mock, monkeypatch):
         """测试 429 触发账号轮换"""
-        monkeypatch.setattr("opencode_rate_limiter.cleanup.get_opencode_auth_files", lambda: [])
-        monkeypatch.setattr(
-            "opencode_rate_limiter.cleanup.get_opencode_native_cache_dirs", lambda: []
-        )
-        monkeypatch.setattr(
-            "opencode_rate_limiter.cleanup.get_opencode_native_state_files", lambda: []
-        )
         daemon = make_daemon(
             tmp_path,
             auto_cleanup=False,
@@ -474,13 +459,6 @@ class TestHealthFeedback:
     @pytest.mark.asyncio
     async def test_rate_limited_marks_failure_once(self, tmp_path, monkeypatch):
         """429 仅标记一次失败（由 _handle_rate_limited 负责）"""
-        monkeypatch.setattr("opencode_rate_limiter.cleanup.get_opencode_auth_files", lambda: [])
-        monkeypatch.setattr(
-            "opencode_rate_limiter.cleanup.get_opencode_native_cache_dirs", lambda: []
-        )
-        monkeypatch.setattr(
-            "opencode_rate_limiter.cleanup.get_opencode_native_state_files", lambda: []
-        )
         daemon = make_daemon(
             tmp_path,
             models=["m1"],
@@ -795,13 +773,6 @@ class TestCleanupDedupPerCycle:
 
     @pytest.mark.asyncio
     async def test_one_cleanup_for_multiple_rate_limited(self, tmp_path, monkeypatch):
-        state_file = tmp_path / "state" / "state.json"
-        state_file.parent.mkdir(parents=True, exist_ok=True)
-        state_file.write_text("{}", encoding="utf-8")
-        monkeypatch.setattr(
-            "opencode_rate_limiter.cleanup.get_opencode_native_state_files",
-            lambda: [state_file],
-        )
         monkeypatch.setattr("opencode_rate_limiter.cleanup.get_opencode_auth_files", lambda: [])
         monkeypatch.setattr(
             "opencode_rate_limiter.cleanup.get_opencode_native_cache_dirs", lambda: []
@@ -822,4 +793,63 @@ class TestCleanupDedupPerCycle:
         await daemon._probe_cycle()
 
         assert daemon.status.total_cleanups == 1
-        assert not state_file.exists()
+
+
+class TestProbeBudget:
+    """每日探测预算测试"""
+
+    @pytest.mark.asyncio
+    async def test_budget_trims_probe_batch(self, tmp_path):
+        daemon = make_daemon(tmp_path, models=["m1", "m2", "m3"], auto_cleanup=False)
+        daemon.config.daemon.daily_probe_budget = 2
+        probed: list[str] = []
+
+        async def ok_probe(model: str, headers: dict[str, str]) -> ProbeResult:
+            probed.append(model)
+            return ProbeResult(model=model, status="available", latency_ms=1.0, timestamp="t")
+
+        daemon.prober.probe = ok_probe  # type: ignore[method-assign]
+        await daemon._probe_cycle()
+        assert len(probed) == 2  # 第 3 个模型被预算裁剪
+        assert daemon._probe_count == 2
+
+    @pytest.mark.asyncio
+    async def test_budget_exhausted_skips_cycle(self, tmp_path):
+        daemon = make_daemon(tmp_path, models=["m1"], auto_cleanup=False)
+        daemon.config.daemon.daily_probe_budget = 1
+        probed: list[str] = []
+
+        async def ok_probe(model: str, headers: dict[str, str]) -> ProbeResult:
+            probed.append(model)
+            return ProbeResult(model=model, status="available", latency_ms=1.0, timestamp="t")
+
+        daemon.prober.probe = ok_probe  # type: ignore[method-assign]
+        await daemon._probe_cycle()
+        await daemon._probe_cycle()  # 预算耗尽，跳过
+        assert probed == ["m1"]
+        assert daemon.status.total_cycles == 2  # 周期仍计数
+
+    @pytest.mark.asyncio
+    async def test_budget_persisted_and_restored(self, tmp_path):
+        daemon = make_daemon(tmp_path, models=["m1"], auto_cleanup=False)
+        daemon.config.daemon.daily_probe_budget = 5
+
+        async def ok_probe(model: str, headers: dict[str, str]) -> ProbeResult:
+            return ProbeResult(model=model, status="available", latency_ms=1.0, timestamp="t")
+
+        daemon.prober.probe = ok_probe  # type: ignore[method-assign]
+        await daemon._probe_cycle()
+        state = json.loads((tmp_path / "daemon.json").read_text(encoding="utf-8"))
+        assert state["probe_usage"]["count"] == 1
+        assert state["probe_usage"]["day"] != ""
+
+        # 重启后恢复计数（同一天内不重置）
+        daemon2 = make_daemon(tmp_path, models=["m1"], auto_cleanup=False)
+        daemon2.config.daemon.daily_probe_budget = 5
+        daemon2._load_probe_usage()
+        assert daemon2._probe_count == 1
+        assert daemon2._probe_day == state["probe_usage"]["day"]
+
+    def test_budget_validation(self):
+        with pytest.raises(ValueError, match="daily_probe_budget"):
+            DaemonConfig(daily_probe_budget=-1).validate()

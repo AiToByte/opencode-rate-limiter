@@ -45,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  opencode-rate-limiter quick                    # Quick rate limit relief
+  opencode-rate-limiter quick                    # Back up auth.json
   opencode-rate-limiter deep                     # Deep cleanup
   opencode-rate-limiter probe all --json         # Probe all models
   opencode-rate-limiter headers --export         # Export headers for curl
@@ -77,8 +77,8 @@ Examples:
         output and completion generation can read the one-line summary."""
         return sub.add_parser(name, parents=[common], help=help_text, description=help_text)
 
-    add_sub("quick", "快速解除限流（清理退避锁 + 重置 Token）")
-    add_sub("deep", "深度清理（+ 清除缓存 + 强制重新登录）")
+    add_sub("quick", "快速维护：备份 auth.json（本地操作不解除服务端限额）")
+    add_sub("deep", "深度维护：quick + 清缓存")
 
     probe_p = add_sub("probe", "探测模型可用性")
     probe_p.add_argument("model", nargs="?", default="all", help="模型名称或 all")

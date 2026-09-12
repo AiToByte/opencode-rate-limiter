@@ -1,8 +1,15 @@
-"""Filesystem cleanup for rate-limit locks, state files, auth tokens and caches."""
+"""Auth backup and cache maintenance.
+
+Note on scope (verified against the opencode source, 2026-09): the Zen free
+tier is rate-limited **server-side** (per-IP daily counters in Redis, reset at
+UTC midnight). The opencode CLI keeps no local rate-limit state, so nothing
+deleted locally can lift a server-side limit. This module therefore only
+performs safe, real operations: backing up auth.json and purging cache
+directories.
+"""
 
 from __future__ import annotations
 
-import json
 import logging
 import shutil
 from dataclasses import dataclass, field
@@ -10,11 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import CleanupConfig
-from .paths import (
-    get_opencode_auth_files,
-    get_opencode_native_cache_dirs,
-    get_opencode_native_state_files,
-)
+from .paths import get_opencode_auth_files, get_opencode_native_cache_dirs
 
 
 @dataclass
@@ -34,58 +37,16 @@ class CleanupResult:
 
 
 class CleanupManager:
-    """File system cleanup for rate limit state, auth, and cache"""
+    """Auth backup and cache maintenance for OpenCode installations"""
 
     def __init__(self, config: CleanupConfig):
         self.config = config
         self.log = logging.getLogger("cleanup")
 
-    def reset_rate_limit_state(
-        self, state_files: list[Path] | None = None, dry_run: bool = False
-    ) -> CleanupResult:
-        """Remove rate limit lock files and state.json"""
-        result = CleanupResult()
-        targets = state_files or get_opencode_native_state_files()
-
-        for path in targets:
-            # Also look for rate_limit lock files in parent directories
-            parent = path.parent
-            if parent.is_dir():
-                for lock_file in parent.glob("*rate_limit*.json"):
-                    if dry_run:
-                        result.details.append(f"DRY RUN: Would remove {lock_file}")
-                        result.cleared_count += 1
-                        continue
-                    try:
-                        lock_file.unlink()
-                        result.cleared_count += 1
-                        result.details.append(f"Removed {lock_file.name}")
-                        self.log.info("Removed rate limit lock: %s", lock_file)
-                    except Exception as e:
-                        result.errors.append(f"Failed to remove {lock_file}: {e}")
-                        self.log.warning("Failed to remove %s: %s", lock_file, e)
-
-            if path.name == "state.json" and path.exists():
-                if dry_run:
-                    result.details.append(f"DRY RUN: Would remove {path}")
-                    result.cleared_count += 1
-                    continue
-                try:
-                    path.unlink()
-                    result.cleared_count += 1
-                    result.details.append(f"Removed {path.name}")
-                    self.log.info("Removed state file: %s", path)
-                except Exception as e:
-                    result.errors.append(f"Failed to remove {path}: {e}")
-                    self.log.warning("Failed to remove %s: %s", path, e)
-
-        return result
-
-    def rotate_auth_tokens(
+    def backup_auth_files(
         self, auth_files: list[Path] | None = None, dry_run: bool = False
     ) -> CleanupResult:
-        """Backup and clear access_token from auth files"""
-
+        """Back up auth.json files to `<name>.json.bak` (contents untouched)"""
         result = CleanupResult()
         targets = auth_files or get_opencode_auth_files()
 
@@ -94,49 +55,26 @@ class CleanupManager:
                 continue
 
             if dry_run:
-                result.details.append(f"DRY RUN: Would rotate {auth_file}")
+                result.details.append(f"DRY RUN: Would back up {auth_file}")
                 result.cleared_count += 1
                 continue
 
             try:
-                # Backup
                 backup_path = auth_file.with_suffix(".json.bak")
                 shutil.copy(auth_file, backup_path)
-                result.details.append(f"Backed up to {backup_path.name}")
-
-                # Clear token
-                with open(auth_file, "r+", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if "access_token" in data:
-                        data["access_token"] = ""
-                    if "rate_limited_until" in data:
-                        del data["rate_limited_until"]
-                    f.seek(0)
-                    json.dump(data, f, indent=2)
-                    f.truncate()
-
                 result.cleared_count += 1
-                result.details.append(f"Cleared tokens in {auth_file.name}")
-                self.log.info("Rotated auth tokens: %s", auth_file)
-
-            except json.JSONDecodeError:
-                try:
-                    auth_file.unlink()
-                    result.details.append(f"Removed corrupt {auth_file.name}")
-                    self.log.warning("Removed corrupt auth file: %s", auth_file)
-                except Exception as e:
-                    result.errors.append(f"Failed to remove corrupt {auth_file}: {e}")
+                result.details.append(f"Backed up {auth_file.name} to {backup_path.name}")
+                self.log.info("Backed up auth file: %s", auth_file)
             except Exception as e:
-                result.errors.append(f"Failed to rotate {auth_file}: {e}")
-                self.log.warning("Failed to rotate %s: %s", auth_file, e)
+                result.errors.append(f"Failed to back up {auth_file}: {e}")
+                self.log.warning("Failed to back up %s: %s", auth_file, e)
 
         return result
 
     def purge_cache(
         self, cache_dirs: list[Path] | None = None, dry_run: bool = False
     ) -> CleanupResult:
-        """Remove cache directories"""
-
+        """Remove and recreate cache directories"""
         result = CleanupResult()
         targets = cache_dirs or get_opencode_native_cache_dirs()
 
@@ -163,28 +101,23 @@ class CleanupManager:
         return result
 
     def full_cleanup(self, dry_run: bool = False, include_cache: bool = True) -> CleanupResult:
-        """Run cleanup operations
+        """Run maintenance operations
 
-        `include_cache=False` limits the pass to rate-limit locks + state.json
-        + auth token reset (the `quick` profile); cache purging is the `deep`
-        profile.
+        `include_cache=False` limits the pass to auth backups (the `quick`
+        profile); cache purging is the `deep` profile. Neither affects the
+        server-side free-tier quota.
         """
         result = CleanupResult()
 
-        r1 = self.reset_rate_limit_state(dry_run=dry_run)
+        r1 = self.backup_auth_files(dry_run=dry_run)
         result.cleared_count += r1.cleared_count
         result.errors.extend(r1.errors)
         result.details.extend(r1.details)
 
-        r2 = self.rotate_auth_tokens(dry_run=dry_run)
-        result.cleared_count += r2.cleared_count
-        result.errors.extend(r2.errors)
-        result.details.extend(r2.details)
-
         if include_cache:
-            r3 = self.purge_cache(dry_run=dry_run)
-            result.cleared_count += r3.cleared_count
-            result.errors.extend(r3.errors)
-            result.details.extend(r3.details)
+            r2 = self.purge_cache(dry_run=dry_run)
+            result.cleared_count += r2.cleared_count
+            result.errors.extend(r2.errors)
+            result.details.extend(r2.details)
 
         return result

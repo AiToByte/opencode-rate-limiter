@@ -35,12 +35,17 @@ FREE_MODELS = [
 
 @dataclass
 class DaemonConfig:
-    interval_seconds: int = 30
+    # Probes consume the same per-IP daily free quota as real usage, so the
+    # default cadence is deliberately conservative (see MANUAL, Zen limits).
+    interval_seconds: int = 900
     models: list[str] = field(default_factory=lambda: list(FREE_MODELS))
     probe_timeout_seconds: float = 10.0
     auto_cleanup_on_429: bool = True
     history_size: int = 20
     respect_cooldown: bool = True
+    # Hard cap on probe requests per UTC day (0 = unlimited). The server
+    # counts every probe against the IP's free daily quota.
+    daily_probe_budget: int = 200
 
     def validate(self) -> None:
         if self.interval_seconds < 5:
@@ -51,6 +56,8 @@ class DaemonConfig:
             raise ValueError("models list cannot be empty")
         if self.history_size < 1:
             raise ValueError(f"history_size must be >= 1, got {self.history_size}")
+        if self.daily_probe_budget < 0:
+            raise ValueError(f"daily_probe_budget must be >= 0, got {self.daily_probe_budget}")
 
 
 @dataclass
@@ -357,6 +364,7 @@ class Config:
                 "auto_cleanup_on_429": self.daemon.auto_cleanup_on_429,
                 "history_size": self.daemon.history_size,
                 "respect_cooldown": self.daemon.respect_cooldown,
+                "daily_probe_budget": self.daemon.daily_probe_budget,
             },
             "account_pool": {
                 "accounts": self.account_pool.accounts,
