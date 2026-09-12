@@ -6,8 +6,9 @@ OpenCode 免费模型限流缓解与账号池管理工具
 
 **Phase 1-6 完成** - 剩余 Phase 7（发布）
 
-> 完整技术说明与使用手册见 **[MANUAL.md](MANUAL.md)**（文档与实测代码逐条核对，
-> `docs/` 下早期文档的出入以 MANUAL.md 为准）。
+> 文档：**[使用手册](docs/user-guide.md)** · [功能介绍](docs/features.md) ·
+> [技术架构](docs/architecture.md) · [实现细节](docs/implementation.md) ·
+> **[MANUAL.md](MANUAL.md)**（命令/配置权威参考）。
 
 ## 快速开始
 
@@ -85,7 +86,7 @@ python scripts/build_binary.py
 
 配置文件位置：`~/.config/opencode-rate-limiter/config.toml`
 
-详见 `docs/configuration.md`
+完整字段表见 [MANUAL.md](MANUAL.md) §5；配置场景速查见 [docs/user-guide.md](docs/user-guide.md)
 
 ## 开发路线图
 
@@ -96,7 +97,7 @@ python scripts/build_binary.py
 - [x] Phase 4: CLI 界面整合
 - [x] Phase 5: 文档与补全生成
 - [x] Phase 6: 测试与二进制打包
-- [ ] Phase 7: 发布（流程见 `docs/release.md`）
+- [ ] Phase 7: 发布（tag → CI 三平台产物；流程待重建）
 
 ## 许可证
 

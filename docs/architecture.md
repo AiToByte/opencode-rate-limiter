@@ -1,174 +1,187 @@
-> **注：本文档为早期拆分文档，已停止维护。** 部分内容属于当时的设计规划，
-> 与当前实现存在出入（差异清单见 MANUAL.md 第 12 节）。
-> **权威文档请以 [MANUAL.md](../MANUAL.md) 为准。**
+# opencode-rate-limiter 技术架构文档
 
-# 架构设计文档
+版本：0.2.0（2026-09） · 适用代码：`opencode_rate_limiter/` 包（当前 main）
 
-## 核心问题：OpenCode 免费模型限流机制深度解析
-
-### 1. 限流识别机制
-
-OpenCode Zen 免费模型通过 **HTTP 请求头** 识别官方客户端：
-
-| 头部 | 官方值 | 说明 |
-|------|--------|------|
-| `User-Agent` | `opencode/x.y.z` | 必需，版本号需匹配 |
-| `x-opencode-client` | `opencode-cli` | 必需，标识客户端类型 |
-| `x-opencode-version` | `x.y.z` | 必需，版本号 |
-
-**无头部 = 匿名客户端 = 极严限流 (约 1-5 RPM)**
-
-### 2. 免费模型池 (2026-08 時点)
-
-| 模型 ID | 提供商 | 端点 | 限额 |
-|---------|--------|------|------|
-| `deepseek-v4-flash-free` | DeepSeek | `/zen/v1/chat/completions` | ~15-20 RPM |
-| `big-pickle` | Stealth | `/zen/v1/chat/completions` | ~15-20 RPM |
-| `mimo-v2.5-free` | Xiaomi | `/zen/v1/chat/completions` | ~15-20 RPM |
-| `nemotron-3-ultra-free` | NVIDIA | `/zen/v1/chat/completions` | ~15-20 RPM |
-| `hy3-free` |  | `/zen/v1/chat/completions` | ~15-20 RPM |
-| `laguna-s-2.1-free` |  | `/zen/v1/chat/completions` | ~15-20 RPM |
-| `ling-3.0-flash-fin-free` |  | `/zen/v1/chat/completions` | ~15-20 RPM |
-| `nemotron-3.5-lightning-free` | NVIDIA | `/zen/v1/chat/completions` | ~15-20 RPM |
-
-**统一端点**: `https://opencode.ai/zen/v1/chat/completions` (OpenAI 兼容)
-
-### 3. 限额规格
-
-| 维度 | 免费版 | 说明 |
-|------|--------|------|
-| 日请求数 | 100 req/day | 账号级 |
-| 分钟请求数 | ~15-20 RPM | 单模型，滑动窗口 |
-| Token/分钟 | 未公开 | 估算受 TPM 影响 |
-| 并发连接 | 未公开 | 估算较低 |
-
-### 4. 错误信号
-
-```json
-// HTTP 429 FreeUsageLimitError
-{
-  "type": "error",
-  "error": {
-    "type": "FreeUsageLimitError",
-    "message": "Error from provider (Console): Rate limit exceeded. Please try again later."
-  }
-}
-```
-
-**关键特征**：
-- 无标准 `Retry-After` 头部
-- 无 `X-RateLimit-*` 头部
-- **Silent Limit** - 客户端需自行估算冷却时间
-
-### 5. 本地状态持久化
-
-OpenCode CLI 在本地记录限流状态：
-
-| 文件 | 关键字段 | 作用 |
-|------|----------|------|
-| `~/.opencode/state.json` | `backoff`, `rate_limited_until` | 本地退避等待 |
-| `~/.opencode/auth.json` | `access_token`, `rate_limited_until` | 凭证层限流标记 |
-| `~/.opencode/cache/*rate_limit*.json` | 缓存的限流锁 | 缓存层限流 |
-
-清理这些文件可**强制解除本地挂起**，但需配合服务端冷却。
-
-### 6. 缓存膨胀与 TPM 压迫
-
-长对话上下文缓存导致请求体积增大，触发上游 TPM 限制：
-- Context Cache 积累 → 请求 Token 数激增 → 触发 TPM 阈值 → 429
-- 定期清理 `~/.opencode/cache/` 可缓解
+> 本文回答"系统为什么长这样"。实现层面的"怎么做的"见 [implementation.md](implementation.md)，
+> 功能层面的"能做什么"见 [features.md](features.md)，操作层面的"怎么用"见
+> [user-guide.md](user-guide.md) 与 [MANUAL.md](../MANUAL.md)（命令/配置权威参考）。
 
 ---
 
-## 工具架构设计
+## 1. 背景与架构约束
 
-### 核心模块
+本工具服务于一个已由源码核实的外部事实（详见 [features.md §1](features.md)）：
+**OpenCode Zen 免费模型的限额完全在服务端**——按出口 IP 的 UTC 日请求计数（Redis）、
+按 key 的 RPM、全局共享的模型 TPM，全部状态存于服务端 Redis/数据库；opencode CLI
+本地不存在任何限流状态；429 响应携带 `retry-after`（= 距 UTC 午夜的秒数）。
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    opencode-rate-limiter                   │
-├─────────────────────────────────────────────────────────┤
-│  CLI Layer (argparse + asyncio)                           │
-├─────────────────────────────────────────────────────────┤
-│  Config Manager (TOML + platformdirs + 默认值)             │
-├─────────────────────────────────────────────────────────┤
-│  Core Services:                                           │
-│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐     │
-│  │ HeaderInject │ │ ModelProber  │ │ AccountPool  │     │
-│  └──────────────┘ └──────────────┘ └──────────────┘     │
-│  ┌──────────────┐ ┌──────────────┐                       │
-│  │ CleanupMgr   │ │ Daemon       │                       │
-│  └──────────────┘ └──────────────┘                       │
-├─────────────────────────────────────────────────────────┤
-│  Utils: Logging (JSON/Structured), Path Resolution       │
-└─────────────────────────────────────────────────────────┘
-```
+这决定了四条不可违背的架构约束：
 
-### 数据流
+| # | 约束 | 架构回应 |
+|---|------|----------|
+| C1 | 本地操作无法解除服务端限额 | 系统定位为**可观测 + 配额保护**，不做任何"解除"承诺；清理功能只做真实存在的事（auth 备份、缓存维护） |
+| C2 | 探测请求与真实用量共享同一 IP 每日配额 | 探测必须有**预算硬上限**（`daily_probe_budget`）和保守默认间隔（900s） |
+| C3 | 429 的重置点是 UTC 午夜 | 冷却期/估算重置统一走 `seconds_to_utc_midnight()`，绝不猜测 60s |
+| C4 | 免费层限额键是 IP，账号不参与 | 账号池明确标注仅对付费 key / BYOK 维度有效；诊断功能主动输出"换账号无效"结论 |
+
+## 2. 总体结构
+
+单包、单依赖方向、无循环。入口点 `opencode_rate_limiter:main` 与公共 API 由
+`__init__.py` 统一再导出。
 
 ```
-用户调用 CLI
-    ↓
-加载配置 (CLI > ENV > 文件 > 默认)
-    ↓
-实例化核心服务
-    ↓
-分发到对应命令处理器
-    ↓
-  ├─ quick/deep → CleanupManager → 文件系统操作
-  ├─ probe → ModelProber → HTTP 探测 → ProbeResult
-  ├─ headers → HeaderInjector → 头部模板 → JSON/ENV
-  ├─ rotate → AccountPool → 轮换策略 → 更新 auth.json
-  ├─ check → 聚合健康检查 → JSON 输出
-  └─ daemon → Daemon.run() → 信号处理 + 定时任务
+                        ┌────────────────────────────┐
+                        │  cli.py                    │
+                        │  cmd_* / COMMAND_HANDLERS  │
+                        │  main()                    │
+                        └─────┬──────────────────────┘
+              ┌───────────────┼───────────────────────┐
+              ▼               ▼                       ▼
+      ┌──────────────┐ ┌─────────────┐      ┌──────────────────┐
+      │ parser.py    │ │ completions │      │ daemon.py        │
+      │ build_parser │ │ (生成补全)  │      │ RateLimiterDaemon│
+      └──────┬───────┘ └──────┬──────┘      │ 单实例锁/状态持久化│
+             │                │             └───────┬──────────┘
+             │                │                     │
+             ▼                ▼                     ▼
+      ┌──────────────────────────────────────────────────────┐
+      │ 服务层                                                │
+      │  prober.py    ModelProber / ProbeResult（共享客户端）  │
+      │  pool.py      AccountPool / AccountHealth（滑动窗口）  │
+      │  cleanup.py   CleanupManager（auth 备份/缓存维护）     │
+      │  diagnostics  run_diagnostics / Finding（诊断报告）    │
+      └──────────────────────┬───────────────────────────────┘
+                             ▼
+      ┌──────────────────────────────────────────────────────┐
+      │ 基础设施层                                            │
+      │  config.py  Config（TOML+ENV+CLI 合并、校验）          │
+      │  paths.py   跨平台路径 / opencode 版本探测 / _dedupe   │
+      │  headers.py HeaderInjector（官方兼容请求头模板）        │
+      │  logs.py    JSON / 人读日志（UTC 时间戳）              │
+      │  meta.py    __version__（单一事实来源）                │
+      └──────────────────────────────────────────────────────┘
 ```
 
-### 守护进程状态机
+模块职责一览：
+
+| 模块 | 职责 | 对外依赖 |
+|------|------|----------|
+| `meta` | 版本号 | 无 |
+| `paths` | OpenCode 候选目录、auth/cache/state 候选路径、`opencode --version` 探测 | platformdirs |
+| `config` | 五段配置（daemon/account_pool/prober/headers/cleanup）的加载、合并、校验 | tomllib / tomli-w / platformdirs / paths |
+| `headers` | 官方 CLI 兼容头模板（`{version}` 占位、可选 Bearer token） | config |
+| `prober` | 异步探测：共享 AsyncClient、状态判定、`error.type` 解析、UTC 午夜估算 | httpx / config |
+| `pool` | 账号池：auth 解析（真实 opencode 结构）、三策略轮换、滑动窗口健康度 | config |
+| `cleanup` | auth 备份、缓存目录维护 | paths / config |
+| `logs` | JSON Lines（真 UTC）与人读日志、Windows GBK 编码防护 | 标准库 |
+| `daemon` | 周期探测编排、冷却/预算/退避、信号控制、单实例锁、状态持久化 | 上述全部 |
+| `service` | systemd / launchd / Windows 任务计划文件模板 | platformdirs |
+| `parser` | argparse 树、结构化命令（banner 抑制）清单 | meta |
+| `completions` | 从**真实 parser** 派生 bash/zsh/fish 补全 | parser / config |
+| `diagnostics` | 出口 IP / 代理环境 / 429 分层诊断报告 | httpx / prober / paths / pool |
+
+## 3. 核心数据流
+
+### 3.1 一次性命令（probe / diagnose / quick / …）
 
 ```
-START
-  ↓
-INIT (加载配置、初始化服务)
-  ↓
-PROBE_LOOP (每 interval 秒)
-  ├─ 并发探测所有配置模型
-  ├─ 收集 ProbeResult
-  ├─ 处理结果:
-  │   ├─ available → 记录健康
-  │   ├─ rate_limited → 触发清理 + 账号轮换 (若启用)
-  │   ├─ error → 记录错误、指数退避
-  │   └─ unknown → 记录
-  └─ 睡眠 interval 秒
-  ↓
-收到信号 (SIGTERM/SIGINT)
-  ↓
-SHUTDOWN (取消任务、清理资源)
-  ↓
-EXIT
+main()
+  → build_parser().parse_args()        # 子命令树；--json/--dry-run 前后皆可（SUPPRESS 技巧）
+  → setup_logging(level, json)         # stderr；JSON 行或人读；win32 reconfigure(errors=replace)
+  → Config.load(args.config)           # CLI > $OPENCODE_RATE_LIMITER_CONFIG > 平台目录 > 默认
+  → COMMAND_HANDLERS[command]()        # 异步处理器，asyncio.run 驱动
+       ├─ probe      → HeaderInjector → ModelProber.probe_all（按账号注入 Authorization）
+       ├─ diagnose   → 出口 IP/代理/auth 盘点 + 单次探测 + findings 报告
+       └─ quick/deep → CleanupManager.full_cleanup（备份 auth [→ 清缓存]）
 ```
 
----
-
-## 设计决策记录
-
-| 决策 | 选项 | 选择 | 理由 |
-|------|------|------|------|
-| 配置格式 | TOML/JSON/YAML | **TOML** | Python 3.11+ 标准库 `tomllib`，零依赖 |
-| 守护进程 | asyncio/systemd 生成 | **asyncio** | 跨平台统一，无需用户配置 systemd |
-| 头部注入 | 硬编码/模板 | **模板** | 支持版本变量、用户自定义 |
-| 探测并发 | 串行/并发 | **并发** | 减少总探测时间 |
-| 单文件分发 | 是/否 | **是** | uvx 友好，PyInstaller 打包 |
-| Python 版本 | 3.10/3.11+ | **3.11+** | `tomllib`、`ExceptionGroup`、`TaskGroup` |
-
----
-
-## 依赖关系图
+### 3.2 守护进程周期（daemon）
 
 ```
-opencode-rate-limiter
-├── 标准库: asyncio, json, logging, pathlib, argparse, tomllib (3.11+)
-├── httpx (HTTP 客户端 + HTTP/2 支持)
-├── tomli-w (TOML 写入)
-├── platformdirs (跨平台目录)
-└── 开发依赖: pytest, pytest-httpx, pytest-asyncio, ruff, mypy, pyinstaller
+run()
+  → _load_probe_usage()                # 跨重启恢复每日探测预算计数
+  → _acquire_lock()                    # O_CREAT|O_EXCL；存活实例→拒绝；死进程→接管
+  → _install_signal_handlers()         # loop.add_signal_handler，win32 回退 signal.signal 桥接
+  → loop:
+      _probe_cycle():
+        1) 冷却过滤（respect_cooldown）      # 429 过的模型在 retry-after 内跳过
+        2) 每日预算裁剪（daily_probe_budget）# 耗尽则整轮跳过
+        3) 按策略为每个模型选账号 → 注入 Bearer token
+        4) probe_all（共享 AsyncClient 并发）
+        5) 结果回写健康度（available=成功；429 由 _handle_rate_limited 记失败+轮换）
+        6) 若有 429 且 auto_cleanup_on_429 → **每轮至多一次** full_cleanup
+        7) 布防/解除冷却（retry_after 或 UTC 午夜估算）
+        8) error_streak（全错连击 → 退避 1×/2×/4×/8×）
+        9) pool_health 快照 + history 环形缓冲 + probe_usage 持久化
+      _wait(interval × 退避倍数)           # stop/probe 双事件可中断
+  → finally: 还原信号 → 写状态 → 释放锁
 ```
+
+### 3.3 诊断（diagnose）
+
+```
+run_diagnostics()
+  → collect_proxy_env()                # 纯本地
+  → fetch_public_ip()                  # 3 个回显服务回退 + ipaddress 校验（遵循代理环境）
+  → fetch_ip_meta()                    # ipinfo.org 归属 enrich（失败降级）
+  → inspect_auth_files()               # 存在性/结构/是否含凭证（无secret）
+  → prober.probe(单模型)               # 仅 1 次配额
+  → _probe_findings()                  # 按 error.type 映射层级行动建议
+  → Diagnosis{verdict, exit_code, findings[]}
+```
+
+## 4. 关键架构决策记录（ADR 摘要）
+
+| 决策 | 备选 | 选择与理由 |
+|------|------|-----------|
+| 代码组织：单文件 → 包 | 继续单文件（分发简单） | **拆为 13 模块**。2500 行单文件的 patch 边界、测试隔离、职责演化都已到极限；`__init__` 再导出保证 API 与入口零破坏 |
+| 探测客户端 | 每请求一个 AsyncClient | **一轮 probe_all 共享一个池化客户端**。8 模型 × 每轮新建 = 每轮 8 次 TLS 握手；共享后连接复用，`_shared_client` 用后即清防泄漏 |
+| 探测频率 | 高频轮询（原 30s） | **900s 默认 + 每日预算 200**。C2：探测与真实用量抢同一份 IP 配额，预算是硬保护而非建议 |
+| 429 应对 | 无条件重试 / 本地清锁 | **冷却期（retry-after / UTC 午夜）+ 指数退避 + 每轮至多一次清理**。C1/C3：只有等待与换 IP 有效，工具的职责是别浪费配额 |
+| 清理功能 | 删锁/删 state/token 手术 | **诚实化：纯备份 + 缓存维护**。源码核实目标文件不存在，删除虚构文件是伪功能且有害（token 手术会登出用户） |
+| 账号池价值 | 宣称免费场景轮换 | **限定付费 key / BYOK 维度**。C4：免费配额键是 IP；文档与诊断均明示 |
+| 单实例锁 | 无 / 文件锁库 | **O_EXCL 锁文件 + 自研存活检测**（win32 `OpenProcess`，POSIX `kill 0`），零新依赖；死进程锁自动接管 |
+| 诊断能力 | 只看 HTTP 状态码 | **解析响应体 `error.type`** 分层定位（IP 配额 / key RPM / 上游错误 / 鉴权），配合出口 IP 核实——直接回答"换节点/换账号为什么没用" |
+| 补全生成 | 手写脚本 | **从真实 argparse parser 派生**，命令/选项/模型列表单一数据源，永不漂移 |
+
+## 5. 状态与持久化
+
+| 载体 | 位置（platformdirs） | 内容 | 写入方式 |
+|------|----------------------|------|----------|
+| `config.toml` | 用户配置目录 | 五段配置；由 `generate-config` 生成 | `Config.save()`（tomli-w） |
+| `daemon.json` | 用户状态目录 | 运行状态 + `probe_usage`（预算跨重启）+ `cooldowns`（内存态）+ `pool_health` + `history`（环形缓冲） | `.tmp` + `os.replace` 原子替换 |
+| `daemon.lock` | 用户状态目录 | 持锁进程 pid | `O_CREAT\|O_EXCL`；释放前校验 pid 为自己 |
+| `auth.json.bak` | 与 auth.json 同目录 | `quick`/`deep`/`rotate --apply` 的备份 | `shutil.copy`，内容不变 |
+
+`check` 命令读取 `daemon.json` 并把运行时字段合并进输出（`pool_health` 归位到
+`account_pool.health`），形成"配置 × 运行时"的单一视图。
+
+## 6. 与外部系统的契约
+
+| 对端 | 契约 | 失败处理 |
+|------|------|----------|
+| Zen 网关 `POST /zen/v1/chat/completions` | OpenAI 兼容体；429 带 `retry-after`；错误体 `{error:{type,message}}` | 状态判定 available/rate_limited/error；`error.type` 解析失败→None；超时→error(timeout) |
+| IP 回显服务 ×3 | 纯文本 IP | 逐个回退 + `ipaddress` 校验；全败→出口未知 |
+| ipinfo.io | JSON（org/country） | 任何失败→空 enrich，不影响诊断 |
+| opencode CLI | `--version` 子命令 | 缺失/失败→`unknown`；`OPENCODE_VERSION` 环境变量可覆盖 |
+| auth.json | `{provider:{type:"oauth",access,refresh,expires}}` 或 `{type:"api",key}` | 只读盘点/备份；解析失败→shape=unreadable |
+
+## 7. 健壮性架构
+
+- **网络**：所有出站请求带超时；IP 回显逐级回退；诊断外部调用永不抛出（降级为 warn finding）。
+- **编码**：win32 下 stdout/stderr `reconfigure(errors="replace")`，GBK 控制台不中断；日志时间戳为真 UTC。
+- **并发**：探测 `asyncio.gather`；清理走 `asyncio.to_thread`；信号经 `call_soon_threadsafe` 桥接进事件循环。
+- **崩溃面**：状态写失败仅 debug 日志；锁损坏按 stale 接管；诊断对任意畸形响应体安全。
+
+## 8. 测试架构
+
+- **布局**：`tests/` 按主题分文件（core/probe/daemon/completions/build_binary/diagnostics），conftest 提供三类 TOML fixture。
+- **隔离约定**：网络 → `pytest-httpx`（注意其响应单次消费语义，周期性探测用 fake probe）；文件系统 → tmp_path + monkeypatch；monkeypatch 目标 = **使用方模块**（如 `opencode_rate_limiter.cli.get_opencode_version`）。
+- **质量门**：mypy strict（27 个源文件）、ruff（100 列规则集）、pytest（asyncio auto 模式），CI 矩阵 3 平台 × Python 3.11–3.13 + 二进制构建。
+- **计时类测试**：并发性验证用放大 sleep（0.2s）+ 宽松上界（0.35s），容忍 CI 抖动但仍能区分串行/并行。
+
+## 9. 演进方向
+
+- 付费 key / BYOK 的 RPM 感知轮换（账号池的真实用武之地，见 features.md §7）
+- 探测历史的趋势命令化（目前经 `check` 展示计数，可增加逐轮 diff）
+- `docs/release.md` 已随旧文档移除；发布流程待 Phase 7 重建（tag → CI 三平台产物）

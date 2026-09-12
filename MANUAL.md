@@ -1,8 +1,8 @@
 # opencode-rate-limiter 技术说明与使用手册
 
 版本：0.2.0
-适用范围：本手册内容全部来自对 `opencode_rate_limiter/` 包实际代码的核对，不描述任何未实现的功能。与 `docs/` 目录下早期文档不一致之处，以本手册为准；
-差异清单见文末「实现事实与文档差异」章节。
+适用范围：本手册内容全部来自对 `opencode_rate_limiter/` 包实际代码的核对，不描述任何未实现的功能。场景化操作见 `docs/user-guide.md`，架构/实现/功能文档见
+`docs/`；早期拆分文档已移除，其历史差异结论保留在文末「实现事实与文档差异」。
 
 ---
 
@@ -63,7 +63,7 @@ opencode-rate-limiter/
 ├── README.md                  # 快速开始
 ├── MANUAL.md                  # 本手册
 ├── CHANGELOG.md               # 变更日志（Keep a Changelog 格式）
-├── docs/                      # 早期拆分文档（部分内容与实际不符，见 §12）
+├── docs/                      # architecture / implementation / features / user-guide
 │   ├── architecture.md
 │   ├── configuration.md
 │   ├── daemon-mode.md
@@ -1006,14 +1006,14 @@ uv run mypy .
 ### 11.3 版本一致性
 
 发布前核对三处版本号一致：`opencode_rate_limiter.__version__`、
-`pyproject.toml`、`man/opencode-rate-limiter.1`。发布步骤见 `docs/release.md`；
+`pyproject.toml`、`man/opencode-rate-limiter.1`。发布流程（tag → CI 产物）待 Phase 7 重建；
 变更记录见 `CHANGELOG.md`。
 
 ---
 
 ## 12. 实现事实与文档差异
 
-早期 `docs/` 拆分为多个文档，其中**大量内容属于规划/未尽实现**。以下条目已被证伪或需修正：
+早期 `docs/` 拆分文档（已移除）中**大量内容属于规划/未尽实现**。以下条目为历史证伪记录：
 
 | 文档声称 | 实际代码 | 影响 |
 |----------|----------|------|
@@ -1035,8 +1035,8 @@ uv run mypy .
 | `docs/architecture.md` 决策记录「Python 3.11+/asyncio/并发」 | 与实现一致 | 无需更正 |
 | 健康度「近 100 次请求」滑动窗口（advanced.md 注释） | 已实现滑动窗口（`health_window`，默认 100）+ EMA 延迟（权重 0.2） | 已解决 |
 
-> 处理建议：`docs/advanced.md` 中「进阶用法」「监控告警」「安全加固」「扩展开发」等章节
-> 目前与代码不符，使用时须以本手册为准；后续版本若实现相应功能再回写这些文档。
+> 处理建议：旧文档所列「进阶用法」「监控告警」「安全加固」「扩展开发」等均为未实现
+> 的规划，使用时须以本手册与 `docs/` 四份现行文档为准。
 
 ## 13. 已知限制
 
