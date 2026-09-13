@@ -9,6 +9,17 @@ All notable changes to opencode-rate-limiter will be documented in this file.
 
 ### Added
 
+- **R4 — 可靠性收尾**：
+  - 冷却期**跨重启持久化**：状态文件改存冷却截止的绝对 UTC 时刻，daemon 重启后
+    恢复剩余冷却（原为剩余秒数且不恢复，重启会对已限流模型空探一轮）。
+  - 嵌套表深合并（`Config._merge_value`）：TOML 嵌套表不再被字符串化；
+    部分 `score_weights` 因与"和为 1"校验冲突而被明确拒绝（提示清晰）。
+  - 头模板新增 `{model}` 占位符（未指定模型时替换为空串）。
+  - 诊断的 NO_PROXY 判定精确化：用 `proxy_bypass_environment` 对探测端点主机名
+    匹配，命中时明确提示"该请求将绕过代理直连"及移除建议。
+  - Windows 任务计划 XML 编码声明由 UTF-16 改为 UTF-8（内容全 ASCII，消除
+    声明与实际编码不一致的导入歧义）。
+
 - **R3 — 可观测性增强**：
   - daemon 决策**事件审计环**：冷却布防 / key 冷却 / 账号轮换 / 自动清理 /
     预算耗尽 / 配置重载均记录 `{ts, kind, ...}`（`[daemon].event_history_size`

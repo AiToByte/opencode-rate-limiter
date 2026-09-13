@@ -80,7 +80,7 @@ def generate_launchd_plist() -> str:
 def generate_task_xml() -> str:
     """Generate a Windows Task Scheduler XML for the daemon"""
     return f"""\
-<?xml version="1.0" encoding="UTF-16"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Description>OpenCode Rate Limiter Daemon</Description>

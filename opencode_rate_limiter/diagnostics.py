@@ -18,8 +18,10 @@ import ipaddress
 import json
 import logging
 import os
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -395,13 +397,23 @@ async def run_diagnostics(config: Config, model: str | None = None) -> Diagnosis
         )
         no_proxy = diagnosis.proxy_env.get("NO_PROXY")
         if no_proxy:
-            diagnosis.findings.append(
-                Finding(
-                    "warn",
-                    "配置了 NO_PROXY",
-                    f"NO_PROXY={no_proxy}：若其匹配 opencode.ai，代理将被绕过（直连）。",
+            try:
+                host = urlsplit(config.prober.endpoint).hostname or ""
+                # dynamic lookup: typeshed gates proxy_bypass_environment by platform
+                bypass_fn = getattr(urllib.request, "proxy_bypass_environment")  # noqa: B009
+                bypassed = bool(host) and bool(bypass_fn(host, {"no": no_proxy}))
+            except Exception:
+                bypassed = False
+            if bypassed:
+                diagnosis.findings.append(
+                    Finding(
+                        "warn",
+                        "NO_PROXY 覆盖了探测端点",
+                        f"NO_PROXY={no_proxy} 匹配 {config.prober.endpoint} ——"
+                        "该请求将绕过代理直连，出口 IP 为本机网络而非代理节点。",
+                        remedy="从 NO_PROXY 中移除 opencode.ai / 相关条目。",
+                    )
                 )
-            )
 
     # 2. Egress IP (best effort, never fatal)
     ip = await loop.run_in_executor(None, fetch_public_ip)

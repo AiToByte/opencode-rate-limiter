@@ -252,3 +252,30 @@ class TestRunDiagnostics:
 
 # httpx import guard (used by timeout test)
 _ = httpx
+
+
+class TestNoProxyMatching:
+    """R4.5: NO_PROXY 精确判定"""
+
+    @pytest.mark.asyncio
+    async def test_no_proxy_covering_endpoint_warns_with_remedy(self, monkeypatch, tmp_path):
+        _patch_env(monkeypatch, tmp_path, _result())
+        monkeypatch.setenv("NO_PROXY", "opencode.ai,localhost")
+        diagnosis = await run_diagnostics(Config(), model="m1")
+        finding = next(f for f in diagnosis.findings if "NO_PROXY" in f.title)
+        assert "绕过代理直连" in finding.detail
+        assert finding.remedy is not None and "NO_PROXY" in finding.remedy
+
+    @pytest.mark.asyncio
+    async def test_unrelated_no_proxy_keeps_quiet(self, monkeypatch, tmp_path):
+        _patch_env(monkeypatch, tmp_path, _result())
+        monkeypatch.setenv("NO_PROXY", "localhost,example.com")
+        diagnosis = await run_diagnostics(Config(), model="m1")
+        assert not any("NO_PROXY" in f.title for f in diagnosis.findings)
+
+    @pytest.mark.asyncio
+    async def test_suffix_no_proxy_matches(self, monkeypatch, tmp_path):
+        _patch_env(monkeypatch, tmp_path, _result())
+        monkeypatch.setenv("NO_PROXY", ".ai,localhost")
+        diagnosis = await run_diagnostics(Config(), model="m1")
+        assert any("NO_PROXY 覆盖了探测端点" in f.title for f in diagnosis.findings)

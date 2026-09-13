@@ -9,6 +9,7 @@ from opencode_rate_limiter import (
     CleanupConfig,
     CleanupManager,
     CleanupResult,
+    Config,
     HeaderInjector,
     HeadersConfig,
     ModelProber,
@@ -518,3 +519,53 @@ class TestMarkResultAttribution:
         pool = self._pool()
         pool.mark_result("a", success=True, latency_ms=10)
         assert pool.health["a"].success_count == 1
+
+
+class TestModelPlaceholder:
+    """R4.4: 头模板 {model} 占位符"""
+
+    def test_user_agent_model_placeholder(self):
+        cfg = HeadersConfig(user_agent="opencode/{model}/{version}")
+        injector = HeaderInjector(cfg, "1.0")
+        h = injector.build_headers("m1")
+        assert h["User-Agent"] == "opencode/m1/1.0"
+
+    def test_model_placeholder_empty_without_model(self):
+        cfg = HeadersConfig(user_agent="opencode/{model}/{version}")
+        injector = HeaderInjector(cfg, "1.0")
+        h = injector.build_headers()
+        assert h["User-Agent"] == "opencode//1.0"
+
+    def test_client_placeholder(self):
+        cfg = HeadersConfig(x_opencode_client="cli-{model}")
+        injector = HeaderInjector(cfg, "1.0")
+        assert injector.build_headers("m1")["x-opencode-client"] == "cli-m1"
+
+
+class TestDeepMerge:
+    """R4.2: 嵌套表深合并"""
+
+    def test_extra_headers_table_preserved_as_dict(self, tmp_path):
+        """TOML 嵌套表经合并后仍是 dict（不被字符串化）"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text('[prober.extra_headers]\nX-Trace = "abc"\n', encoding="utf-8")
+        config = Config.load(config_file)
+        assert config.prober.extra_headers == {"X-Trace": "abc"}
+
+    def test_partial_score_weights_rejected_with_clear_error(self, tmp_path):
+        """部分 score_weights 与'和为 1'校验冲突 → 明确报错而非静默替换"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            "[account_pool]\nscore_weights = { success = 0.8 }\n", encoding="utf-8"
+        )
+        with pytest.raises(ValueError, match=r"sum to 1\.0"):
+            Config.load(config_file)
+
+    def test_full_score_weights_replacement_works(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            "[account_pool]\nscore_weights = { success = 0.8, latency = 0.1, recency = 0.1 }\n",
+            encoding="utf-8",
+        )
+        config = Config.load(config_file)
+        assert config.account_pool.score_weights == {"success": 0.8, "latency": 0.1, "recency": 0.1}

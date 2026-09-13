@@ -162,14 +162,14 @@
 
 ---
 
-## 5. R4 — 可靠性收尾（P1）
+## 5. R4 — 可靠性收尾（P1）—— 已于 v0.3.0 实现
 
 来自 implementation.md §10 与 MANUAL §13 的遗留毛边，逐项小改动：
 
 | # | 任务 | 模块 | 说明 |
 |---|------|------|------|
 | R4.1 | 冷却期跨重启持久化（存绝对 UTC 时刻而非剩余秒） | daemon | 重启后不再对已限流模型空探一轮 |
-| R4.2 | 嵌套表深合并（`score_weights`/`extra_headers` 部分覆盖合法化） | config | 保持"整表替换"开关兼容 |
+| R4.2 | 嵌套表深合并（`extra_headers` 等嵌套表不再被字符串化；部分 `score_weights` 因与"和为 1"校验冲突而被明确拒绝） | config | 深合并实现于 `_merge_value` |
 | R4.3 | Windows 任务 XML 按声明编码（UTF-16）输出或改声明为 UTF-8 | service | 消除 schtasks 导入歧义 |
 | R4.4 | `headers` 模板支持 `{model}` 占位符 | headers | 低频需求，顺手 |
 | R4.5 | NO_PROXY 与目标域匹配的精确判定（当前为条件性提示） | diagnostics | 用 `urllib.proxy_bypass`/自实现匹配 |

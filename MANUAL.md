@@ -542,7 +542,7 @@ opencode-rate-limiter generate-launchd
 opencode-rate-limiter generate-task
 ```
 
-输出 UTF-16 任务 XML：登录时触发，`LeastPrivilege` 权限，网络可用才运行，
+输出 UTF-8 任务 XML：登录时触发，`LeastPrivilege` 权限，网络可用才运行，
 `MultipleInstancesPolicy=IgnoreNew`，命令为解析到的可执行文件 + 参数 `daemon`。
 
 ### 4.13 `generate-config` —— 生成默认配置文件
@@ -708,7 +708,8 @@ recency_score = min(1.0, hours_since_last_error / 24)          # 无错误记录
 | `x_opencode_client` | str | `"opencode-cli"` |
 | `x_opencode_version` | str | `"{version}"` |
 
-> 仅 `{version}` 会被替换；早期文档提到的 `{timestamp}` / `{random}` 占位符**未实现**。
+> 占位符：`{version}` 与 `{model}`（R4，未指定模型时替换为空串）；早期文档提到的
+> `{timestamp}` / `{random}` **未实现**。
 
 #### `[cleanup]`
 
@@ -823,7 +824,7 @@ pool_health(账号健康快照: success / total / consecutive_failures / avg_lat
 history(探测历史环形缓冲: [{ts, models: {模型: 状态}}]，最多 history_size 条)
 events(决策事件审计环: [{ts, kind, ...}——cooldown_armed/key_cooldown/rotation/
 cleanup/budget_exhausted/reload]，最多 event_history_size 条)
-cooldowns(模型 → 剩余冷却秒数，仅内存状态，重启后清零)
+cooldowns(模型 → 冷却截止的绝对 UTC 时刻，重启后恢复剩余时间)
 probe_usage({day, count}——每日探测预算计数，跨重启恢复)
 pid / updated_at
 ```
@@ -1064,7 +1065,7 @@ uv run mypy .
    OpenCode 的 `auth.json`（带备份），且不影响 OpenCode CLI 正在运行中的会话。
 2. **凭证解析覆盖 oauth/api 双形态**（`access`/`access_token`/`key`，顶层或一层
    嵌套）；OpenCode auth 结构再变化时需扩展 `extract_credential`。
-3. **头模板只支持 `{version}`** 一个占位符。
+3. **头模板仅支持 `{version}` / `{model}`** 两个占位符。
 4. **探测与真实用量共享每日 IP 配额**：网关按请求数（而非 token 数）对免费层计费，
    每次探测都计入同一 IP 的每日额度。默认 `daily_probe_budget=200` 硬上限 +
    900s 间隔即是为此；调高预算等于挤占真实使用额度。

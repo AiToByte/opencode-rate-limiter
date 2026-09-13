@@ -28,6 +28,11 @@ from .pool import Account, AccountPool
 from .prober import ModelProber, ProbeResult
 
 
+def _now() -> _dt.datetime:
+    """Current UTC time (naive, for stable isoformat round-trips)"""
+    return _dt.datetime.now(_dt.UTC).replace(tzinfo=None)
+
+
 def _now_iso() -> str:
     """Current UTC timestamp in ISO-8601 Z format"""
     return _dt.datetime.now(_dt.UTC).isoformat().replace("+00:00", "Z")
@@ -196,18 +201,30 @@ class RateLimiterDaemon:
         """Append a decision event to the audit ring (persisted via daemon.json)"""
         self.status.events.append({"ts": _now_iso(), "kind": kind, **fields})
 
-    def _load_probe_usage(self) -> None:
-        """Restore the daily probe budget counter across restarts"""
+    def _load_runtime_state(self) -> None:
+        """Restore runtime state across restarts: probe budget + cooldowns"""
         state = load_daemon_state(self._state_path)
         usage = state.get("probe_usage") if state else None
         if isinstance(usage, dict):
             self._probe_day = str(usage.get("day", ""))
             with contextlib.suppress(TypeError, ValueError):
                 self._probe_count = int(usage.get("count", 0))
+        cooldowns = state.get("cooldowns") if state else None
+        if isinstance(cooldowns, dict):
+            now_utc = _dt.datetime.now(_dt.UTC).replace(tzinfo=None)
+            now_mono = time.monotonic()
+            for model, raw in cooldowns.items():
+                try:
+                    deadline = _dt.datetime.fromisoformat(str(raw))
+                    remaining = (deadline - now_utc).total_seconds()
+                except (TypeError, ValueError):
+                    continue
+                if remaining > 0:
+                    self._cooldowns[str(model)] = now_mono + remaining
 
     async def run(self) -> None:
 
-        self._load_probe_usage()
+        self._load_runtime_state()
         self._acquire_lock()
         self._install_signal_handlers()
         self._running = True
@@ -473,9 +490,12 @@ class RateLimiterDaemon:
         data = self.status.to_dict()
         data["probe_usage"] = {"day": self._probe_day, "count": self._probe_count}
         if self._cooldowns:
+            # Absolute UTC timestamps: cooldowns survive daemon restarts
             now = time.monotonic()
             data["cooldowns"] = {
-                m: round(until - now) for m, until in sorted(self._cooldowns.items()) if until > now
+                m: (_now() + _dt.timedelta(seconds=until - now)).isoformat()
+                for m, until in sorted(self._cooldowns.items())
+                if until > now
             }
         data["pid"] = os.getpid()
         data["updated_at"] = _now_iso()

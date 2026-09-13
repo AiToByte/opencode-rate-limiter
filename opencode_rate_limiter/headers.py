@@ -15,10 +15,11 @@ class HeaderInjector:
         self.version = version
 
     def build_headers(self, model: str | None = None, token: str | None = None) -> dict[str, str]:
+        format_args = {"version": self.version, "model": model or ""}
         headers = {
-            "User-Agent": self.config.user_agent.format(version=self.version),
-            "x-opencode-client": self.config.x_opencode_client,
-            "x-opencode-version": self.config.x_opencode_version.format(version=self.version),
+            "User-Agent": self.config.user_agent.format(**format_args),
+            "x-opencode-client": self.config.x_opencode_client.format(**format_args),
+            "x-opencode-version": self.config.x_opencode_version.format(**format_args),
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
         }

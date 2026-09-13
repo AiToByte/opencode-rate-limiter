@@ -258,6 +258,20 @@ class Config:
         return value
 
     @staticmethod
+    def _merge_value(current_value: Any, new_value: Any) -> Any:
+        """Merge a config value: nested tables deep-merge, everything else coerces
+
+        Deep merging lets partial tables (e.g. only two of the three
+        score_weights) override defaults instead of replacing them; a full
+        replacement is still possible by specifying every key.
+        """
+        if isinstance(current_value, dict) and isinstance(new_value, dict):
+            merged = dict(current_value)
+            merged.update(new_value)
+            return merged
+        return Config._coerce_value(current_value, new_value)
+
+    @staticmethod
     def _coerce_value(current_value: Any, new_value: Any) -> Any:
         """Coerce new_value to match the type of current_value"""
         if isinstance(current_value, bool):
@@ -286,35 +300,35 @@ class Config:
             for k, v in override["daemon"].items():
                 if hasattr(result.daemon, k):
                     current = getattr(result.daemon, k)
-                    setattr(result.daemon, k, cls._coerce_value(current, v))
+                    setattr(result.daemon, k, cls._merge_value(current, v))
 
         # Merge account_pool
         if "account_pool" in override:
             for k, v in override["account_pool"].items():
                 if hasattr(result.account_pool, k):
                     current = getattr(result.account_pool, k)
-                    setattr(result.account_pool, k, cls._coerce_value(current, v))
+                    setattr(result.account_pool, k, cls._merge_value(current, v))
 
         # Merge prober
         if "prober" in override:
             for k, v in override["prober"].items():
                 if hasattr(result.prober, k):
                     current = getattr(result.prober, k)
-                    setattr(result.prober, k, cls._coerce_value(current, v))
+                    setattr(result.prober, k, cls._merge_value(current, v))
 
         # Merge headers
         if "headers" in override:
             for k, v in override["headers"].items():
                 if hasattr(result.headers, k):
                     current = getattr(result.headers, k)
-                    setattr(result.headers, k, cls._coerce_value(current, v))
+                    setattr(result.headers, k, cls._merge_value(current, v))
 
         # Merge cleanup
         if "cleanup" in override:
             for k, v in override["cleanup"].items():
                 if hasattr(result.cleanup, k):
                     current = getattr(result.cleanup, k)
-                    setattr(result.cleanup, k, cls._coerce_value(current, v))
+                    setattr(result.cleanup, k, cls._merge_value(current, v))
 
         return result
 

@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import datetime as _dt
 import json
 import os
 import signal
@@ -766,7 +767,15 @@ class TestRateLimitCooldown:
         await daemon._probe_cycle()
 
         data = json.loads((tmp_path / "daemon.json").read_text(encoding="utf-8"))
-        assert 0 < data["cooldowns"]["m1"] <= 90
+        # 绝对 UTC 时刻（ISO），可被重启恢复为剩余秒数
+        raw = data["cooldowns"]["m1"]
+        deadline = _dt.datetime.fromisoformat(raw)
+        remaining = (deadline - _dt.datetime.now(_dt.UTC).replace(tzinfo=None)).total_seconds()
+        assert 0 < remaining <= 90
+
+        daemon2 = make_daemon(tmp_path, models=["m1"], auto_cleanup=False)
+        daemon2._load_runtime_state()
+        assert "m1" in daemon2._cooldowns  # 冷却跨重启恢复
 
 
 class TestCleanupDedupPerCycle:
@@ -847,7 +856,7 @@ class TestProbeBudget:
         # 重启后恢复计数（同一天内不重置）
         daemon2 = make_daemon(tmp_path, models=["m1"], auto_cleanup=False)
         daemon2.config.daemon.daily_probe_budget = 5
-        daemon2._load_probe_usage()
+        daemon2._load_runtime_state()
         assert daemon2._probe_count == 1
         assert daemon2._probe_day == state["probe_usage"]["day"]
 
