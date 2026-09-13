@@ -253,7 +253,9 @@ score_weights = { success = 0.5, latency = 0.3, recency = 0.2 }
 CLI 显式给的 `--interval/--models` 覆盖在重载后依然保留。
 
 **Q8：哪里看"某模型最近一段时间稳不稳"？**
-`check` 的 `probe history` 段（各模型近 N 轮的状态计数，N=`history_size`）。
+`check --trend`：趋势网格（各模型近 N 轮的状态字母矩阵）+ 最近决策事件；
+`probe history` 计数段仍然保留。`probe` 也会在输出末尾提示与 daemon 上一轮相比
+新限流/已恢复的模型。
 
 ---
 

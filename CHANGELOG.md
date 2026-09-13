@@ -7,7 +7,16 @@ All notable changes to opencode-rate-limiter will be documented in this file.
 
 ## [Unreleased]
 
-（暂无）
+### Added
+
+- **R3 — 可观测性增强**：
+  - daemon 决策**事件审计环**：冷却布防 / key 冷却 / 账号轮换 / 自动清理 /
+    预算耗尽 / 配置重载均记录 `{ts, kind, ...}`（`[daemon].event_history_size`
+    控制，默认 50，随 daemon.json 持久化），`check --json` 可查询。
+  - `check --trend`：各模型近 N 轮的**趋势网格**（`a`/`!`/`x`/`.`，左→右=旧→新）
+    与最近事件（新→旧）。
+  - `probe` 人读输出自动附加「与 daemon 上一轮相比」的 diff（新增限流/已恢复模型）。
+
 
 ## [0.3.0] - 2026-09-12
 

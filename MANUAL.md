@@ -416,11 +416,13 @@ opencode-rate-limiter rotate [--strategy round_robin|least_used|health]
 ### 4.7 `check` —— 健康检查聚合输出
 
 ```
-opencode-rate-limiter check [--json]
+opencode-rate-limiter check [--json] [--trend]
 ```
 
 - 行为：默认输出**人读摘要**（版本 / 守护进程配置与运行时 / 账号池与健康度 /
-  最近探测结果 / 路径计数）；`--json` 输出完整机器可读报告。
+  最近探测结果 / 路径计数）；`--trend` 追加**趋势网格**（各模型近 N 轮的状态字母
+  矩阵，`a`可用 `!`限流 `x`错误 `.`未探测，左→右=旧→新）与**最近事件**
+  （轮换/清理/冷却/预算/重载，新→旧）；`--json` 输出完整机器可读报告。
 - 输出结构：
 
 ```jsonc
@@ -647,6 +649,7 @@ preserve_config = true         # 必须为 true（校验强制）
 | `probe_timeout_seconds` | float | 10.0 | > 0 |
 | `auto_cleanup_on_429` | bool | true | - |
 | `history_size` | int | 20 | ≥ 1 |
+| `event_history_size` | int | 50 | ≥ 1 |
 | `respect_cooldown` | bool | true | 限流模型的冷却期内跳过探测（省配额） |
 
 #### `[account_pool]`
@@ -818,6 +821,8 @@ running / uptime_seconds / last_probe / next_probe / last_cleanup
 total_cycles / total_cleanups / models(按名排序的探测结果)
 pool_health(账号健康快照: success / total / consecutive_failures / avg_latency_ms / score)
 history(探测历史环形缓冲: [{ts, models: {模型: 状态}}]，最多 history_size 条)
+events(决策事件审计环: [{ts, kind, ...}——cooldown_armed/key_cooldown/rotation/
+cleanup/budget_exhausted/reload]，最多 event_history_size 条)
 cooldowns(模型 → 剩余冷却秒数，仅内存状态，重启后清零)
 probe_usage({day, count}——每日探测预算计数，跨重启恢复)
 pid / updated_at
