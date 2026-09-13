@@ -20,6 +20,7 @@ from opencode_rate_limiter import (
     RateLimiterDaemon,
     _pid_alive,
     cmd_check,
+    cmd_probe,
     generate_launchd_plist,
     generate_systemd_unit,
     generate_task_xml,
@@ -932,3 +933,176 @@ class TestKeyCooldownAndAttribution:
 
         daemon._key_cooldowns["b"] = float("inf")
         assert daemon._pick_account() is None  # 全部冷却 → 匿名回退
+
+
+class TestEventAuditRing:
+    """R3: 决策事件审计环"""
+
+    @pytest.mark.asyncio
+    async def test_events_recorded_and_persisted(self, tmp_path, monkeypatch):
+        daemon = make_daemon(
+            tmp_path,
+            models=["m1"],
+            auto_cleanup=True,
+            accounts=[{"name": "a", "auth_json": "{}"}, {"name": "b", "auth_json": "{}"}],
+            strategy="round_robin",
+        )
+        monkeypatch.setattr("opencode_rate_limiter.cleanup.get_opencode_auth_files", lambda: [])
+        monkeypatch.setattr(
+            "opencode_rate_limiter.cleanup.get_opencode_native_cache_dirs", lambda: []
+        )
+
+        async def probe(model: str, headers: dict[str, str]) -> ProbeResult:
+            return ProbeResult(
+                model=model,
+                status="rate_limited",
+                http_status=429,
+                retry_after=60,
+                estimated_reset=60,
+                error_type="RateLimitError",
+                timestamp="t",
+            )
+
+        daemon.prober.probe = probe  # type: ignore[method-assign]
+        await daemon._probe_cycle()
+
+        kinds = [e["kind"] for e in daemon.status.events]
+        assert "cooldown_armed" in kinds
+        assert "key_cooldown" in kinds
+        assert "cleanup" in kinds
+        assert "rotation" in kinds
+
+        data = json.loads((tmp_path / "daemon.json").read_text(encoding="utf-8"))
+        assert {e["kind"] for e in data["events"]} >= {"cooldown_armed", "cleanup"}
+
+    @pytest.mark.asyncio
+    async def test_budget_exhausted_recorded(self, tmp_path):
+        daemon = make_daemon(tmp_path, models=["m1"], auto_cleanup=False)
+        daemon.config.daemon.daily_probe_budget = 1
+        probed: list[str] = []
+
+        async def ok_probe(model: str, headers: dict[str, str]) -> ProbeResult:
+            probed.append(model)
+            return ProbeResult(model=model, status="available", latency_ms=1.0, timestamp="t")
+
+        daemon.prober.probe = ok_probe  # type: ignore[method-assign]
+        await daemon._probe_cycle()
+        await daemon._probe_cycle()  # 预算已耗尽
+        assert probed == ["m1"]
+        assert any(e["kind"] == "budget_exhausted" for e in daemon.status.events)
+
+    def test_event_size_validation(self):
+        with pytest.raises(ValueError, match="event_history_size"):
+            DaemonConfig(event_history_size=0).validate()
+
+    @pytest.mark.asyncio
+    async def test_reload_recorded(self, tmp_path, monkeypatch):
+        daemon = make_daemon(tmp_path, models=["m1"], auto_cleanup=False)
+        config = daemon.config
+
+        def fake_load(cls, path=None):
+            return config
+
+        monkeypatch.setattr("opencode_rate_limiter.Config.load", classmethod(fake_load))
+        daemon._reload_config()
+        assert any(e["kind"] == "reload" for e in daemon.status.events)
+
+
+class TestCheckTrendAndDiff:
+    """R3: check --trend 网格与 probe diff"""
+
+    @pytest.mark.asyncio
+    async def test_check_trend_grid_and_events(self, monkeypatch, capsys, tmp_path):
+        state_path = tmp_path / "daemon.json"
+        history = [
+            {"ts": f"t{i}", "models": {"m1": s, "m2": "available"}}
+            for i, s in enumerate(["available", "rate_limited", "available", "error"])
+        ]
+        state_path.write_text(
+            json.dumps(
+                {
+                    "running": False,
+                    "history": history,
+                    "events": [
+                        {"ts": "2026-09-12T01:00:00Z", "kind": "cooldown_armed", "model": "m1"},
+                        {"ts": "2026-09-12T02:00:00Z", "kind": "cleanup", "models": 1},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "opencode_rate_limiter.daemon.get_daemon_state_path", lambda: state_path
+        )
+
+        rc = await cmd_check(Config(), argparse.Namespace(json=False, trend=True))
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert "trend grid" in out
+        # m1 行按时间序展示四种状态；m2 全可用
+        assert "a ! a x" in out
+        assert "a a a a" in out
+        assert "左→右 = 旧→新" in out
+        assert "recent events" in out
+        assert "cooldown_armed (model=m1)" in out
+        assert "cleanup (models=1)" in out
+
+    @pytest.mark.asyncio
+    async def test_check_without_trend_hides_grid(self, monkeypatch, capsys, tmp_path):
+        state_path = tmp_path / "daemon.json"
+        state_path.write_text(
+            json.dumps({"history": [{"ts": "t", "models": {"m1": "available"}}]}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "opencode_rate_limiter.daemon.get_daemon_state_path", lambda: state_path
+        )
+        await cmd_check(Config(), argparse.Namespace(json=False, trend=False))
+        out = capsys.readouterr().out
+        assert "trend grid" not in out
+
+
+class TestProbeDiff:
+    """R3: probe 与 daemon 上一轮的 diff"""
+
+    def _state(self, tmp_path, models: dict[str, str]):
+        state_path = tmp_path / "daemon.json"
+        state_path.write_text(
+            json.dumps(
+                {"models": {m: {"status": s, "latency_ms": 1.0} for m, s in models.items()}}
+            ),
+            encoding="utf-8",
+        )
+        return state_path
+
+    @pytest.mark.asyncio
+    async def test_diff_reports_changes(self, tmp_path, monkeypatch, httpx_mock, capsys):
+        self._state(tmp_path, {"m1": "rate_limited", "m2": "available"})
+        monkeypatch.setattr(
+            "opencode_rate_limiter.daemon.get_daemon_state_path", lambda: tmp_path / "daemon.json"
+        )
+        monkeypatch.setattr("opencode_rate_limiter.cli.get_opencode_version", lambda: "1.0")
+        httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
+        httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=429, json={})
+        config = Config(daemon=DaemonConfig(models=["m1", "m2"]))
+
+        rc = await cmd_probe(config, argparse.Namespace(model="all", json=False))
+        out = capsys.readouterr().out
+        assert rc == 1  # m2 新限流
+        assert "已恢复: m1" in out  # m1 恢复
+        assert "新增限流: m2" in out  # m2 新限流
+
+    @pytest.mark.asyncio
+    async def test_no_diff_when_no_daemon_state(self, monkeypatch, httpx_mock, capsys, tmp_path):
+        monkeypatch.setattr(
+            "opencode_rate_limiter.daemon.get_daemon_state_path",
+            lambda: tmp_path / "no.json",
+        )
+        monkeypatch.setattr("opencode_rate_limiter.cli.get_opencode_version", lambda: "1.0")
+        httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
+        config = Config(daemon=DaemonConfig(models=["m1"]))
+
+        await cmd_probe(config, argparse.Namespace(model="all", json=False))
+        out = capsys.readouterr().out
+        assert "daemon 上一轮" not in out

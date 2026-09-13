@@ -48,6 +48,8 @@ complete -c opencode-rate-limiter -f -n "__fish_use_subcommand" \
 complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from probe" \
     -a "(__fish_opencode_rate_limiter_probe_models)"
 
+complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from check" \
+    -l trend
 complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from daemon" \
     -l interval
     -l models

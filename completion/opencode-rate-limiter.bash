@@ -8,6 +8,7 @@ _opencode_rate_limiter() {
     case "${prev}" in
         --config) COMPREPLY=( $(compgen -f -- "${cur}") ); return 0 ;;
         --strategy) COMPREPLY=( $(compgen -W "round_robin least_used health" -- "${cur}") ); return 0 ;;
+        check) COMPREPLY=( $(compgen -W "--trend" -- "${cur}") ); return 0 ;;
         daemon) COMPREPLY=( $(compgen -W "--interval --models" -- "${cur}") ); return 0 ;;
         diagnose) COMPREPLY=( $(compgen -W "--model" -- "${cur}") ); return 0 ;;
         generate-config) COMPREPLY=( $(compgen -W "--force" -- "${cur}") ); return 0 ;;

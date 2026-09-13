@@ -98,7 +98,8 @@ Examples:
         help="把选中账号的 auth JSON 写入 OpenCode auth.json（先备份；需搭配 --dry-run 预览）",
     )
 
-    add_sub("check", "健康检查聚合输出")
+    check_p = add_sub("check", "健康检查聚合输出")
+    check_p.add_argument("--trend", action="store_true", help="附显示探测趋势网格与最近事件")
 
     diag_p = add_sub("diagnose", "Zen 限额诊断（出口 IP / 代理 / 错误层级 / 建议）")
     diag_p.add_argument("--model", help="探测的模型（默认取配置列表第一个；仅消耗 1 次配额）")

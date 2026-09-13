@@ -55,6 +55,7 @@ _opencode_rate_limiter() {
         ${options} \
         '(-)'{${commands}} \
         '--strategy: :($strategies)'
+        'check: :(--trend)'
         'daemon: :(--interval --models)'
         'diagnose: :(--model)'
         'generate-config: :(--force)'

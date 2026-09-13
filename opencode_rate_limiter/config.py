@@ -42,6 +42,7 @@ class DaemonConfig:
     probe_timeout_seconds: float = 10.0
     auto_cleanup_on_429: bool = True
     history_size: int = 20
+    event_history_size: int = 50
     respect_cooldown: bool = True
     # Hard cap on probe requests per UTC day (0 = unlimited). The server
     # counts every probe against the IP's free daily quota.
@@ -56,6 +57,8 @@ class DaemonConfig:
             raise ValueError("models list cannot be empty")
         if self.history_size < 1:
             raise ValueError(f"history_size must be >= 1, got {self.history_size}")
+        if self.event_history_size < 1:
+            raise ValueError(f"event_history_size must be >= 1, got {self.event_history_size}")
         if self.daily_probe_budget < 0:
             raise ValueError(f"daily_probe_budget must be >= 0, got {self.daily_probe_budget}")
 
@@ -363,6 +366,7 @@ class Config:
                 "probe_timeout_seconds": self.daemon.probe_timeout_seconds,
                 "auto_cleanup_on_429": self.daemon.auto_cleanup_on_429,
                 "history_size": self.daemon.history_size,
+                "event_history_size": self.daemon.event_history_size,
                 "respect_cooldown": self.daemon.respect_cooldown,
                 "daily_probe_budget": self.daemon.daily_probe_budget,
             },

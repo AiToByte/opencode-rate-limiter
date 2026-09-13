@@ -58,6 +58,7 @@ class DaemonStatus:
     model_results: dict[str, ProbeResult] = field(default_factory=dict)
     pool_health: dict[str, dict[str, Any]] = field(default_factory=dict)
     history: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=20))
+    events: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=50))
 
     def to_dict(self) -> dict[str, Any]:
 
@@ -75,6 +76,7 @@ class DaemonStatus:
             "models": {name: r.to_dict() for name, r in sorted(self.model_results.items())},
             "pool_health": self.pool_health,
             "history": list(self.history),
+            "events": list(self.events),
         }
 
 
@@ -186,6 +188,13 @@ class RateLimiterDaemon:
         size = self.config.daemon.history_size
         if self.status.history.maxlen != size:
             self.status.history = deque(self.status.history, maxlen=size)
+        event_size = self.config.daemon.event_history_size
+        if self.status.events.maxlen != event_size:
+            self.status.events = deque(self.status.events, maxlen=event_size)
+
+    def _record_event(self, kind: str, **fields: Any) -> None:
+        """Append a decision event to the audit ring (persisted via daemon.json)"""
+        self.status.events.append({"ts": _now_iso(), "kind": kind, **fields})
 
     def _load_probe_usage(self) -> None:
         """Restore the daily probe budget counter across restarts"""
@@ -339,6 +348,7 @@ class RateLimiterDaemon:
                 "Daily probe budget exhausted; skipping cycle",
                 extra={"budget": budget, "used": self._probe_count},
             )
+            self._record_event("budget_exhausted", budget=budget, used=self._probe_count)
             self._persist_state()
             return
         if budget:
@@ -406,6 +416,7 @@ class RateLimiterDaemon:
             await asyncio.to_thread(self.cleanup.full_cleanup)
             self.status.total_cleanups += 1
             self.status.last_cleanup = _now_iso()
+            self._record_event("cleanup", trigger="429", models=len(limited))
             self.log.info(
                 "Auto cleanup triggered", extra={"trigger": "429", "models": len(limited)}
             )
@@ -416,6 +427,7 @@ class RateLimiterDaemon:
                 wait = r.retry_after or r.estimated_reset
                 if wait:
                     self._cooldowns[r.model] = time.monotonic() + wait
+                    self._record_event("cooldown_armed", model=r.model, seconds=wait)
         # Clear cooldowns for models that probed fine
         for r in results:
             if r.status != "rate_limited":
@@ -496,6 +508,7 @@ class RateLimiterDaemon:
             if result.error_type == "RateLimitError" and name is not None:
                 # Key-dimension limit: cool this account down for a minute
                 self._key_cooldowns[name] = time.monotonic() + 60
+                self._record_event("key_cooldown", account=name, seconds=60)
                 self.log.info(
                     "Key cooldown armed",
                     extra={"account": name, "seconds": 60, "error_type": result.error_type},
@@ -503,6 +516,12 @@ class RateLimiterDaemon:
             if len(self.pool.accounts) > 1:
                 next_account = self.pool.get_next()
                 if next_account is not None:
+                    self._record_event(
+                        "rotation",
+                        model=result.model,
+                        **{"from": name},
+                        to=next_account.name,
+                    )
                     self.log.info(
                         "Account rotated",
                         extra={
@@ -581,6 +600,11 @@ class RateLimiterDaemon:
             for name, health in old_pool.health.items():
                 if name in self.pool.health:
                     self.pool.health[name] = health
+        self._record_event(
+            "reload",
+            interval=self._effective_interval(),
+            models=len(self._effective_models()),
+        )
         self.log.info(
             "Config reloaded",
             extra={"interval": self._effective_interval(), "models": len(self._effective_models())},
