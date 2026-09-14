@@ -224,12 +224,14 @@ class TestDaemonMode:
 
         await daemon._probe_cycle()
 
-        # 指针前进：当前账号应轮换到 backup1
+        # 归因记在实际服务的 primary 上；轮换是惰性的——下一轮才取新账号，
+        # round-robin 游标每轮只消费一次
         assert daemon.pool is not None
-        current = daemon.pool.get_current()
-        assert current is not None
-        assert current.name == "backup1"
+        assert daemon.pool.last_served is not None
+        assert daemon.pool.last_served.name == "primary"
         assert daemon.pool.health["primary"].consecutive_failures == 1
+        nxt = daemon.pool.get_next()
+        assert nxt is not None and nxt.name == "backup1"  # 下一轮服务 backup1
         # auto_cleanup 关闭时不应触发清理
         assert daemon.status.total_cleanups == 0
 
@@ -287,7 +289,7 @@ class TestDaemonState:
             encoding="utf-8",
         )
         monkeypatch.setattr(
-            "opencode_rate_limiter.daemon.get_daemon_state_path", lambda: state_path
+            "opencode_rate_limiter.daemon._state.get_daemon_state_path", lambda: state_path
         )
 
         rc = await cmd_check(Config(), argparse.Namespace(json=False))
@@ -301,7 +303,8 @@ class TestDaemonState:
     def test_load_daemon_state_missing(self, monkeypatch, tmp_path):
         """测试状态文件不存在时返回 None"""
         monkeypatch.setattr(
-            "opencode_rate_limiter.daemon.get_daemon_state_path", lambda: tmp_path / "nope.json"
+            "opencode_rate_limiter.daemon._state.get_daemon_state_path",
+            lambda: tmp_path / "nope.json",
         )
         assert load_daemon_state() is None
 
@@ -561,7 +564,7 @@ class TestPoolHealthPersistence:
             encoding="utf-8",
         )
         monkeypatch.setattr(
-            "opencode_rate_limiter.daemon.get_daemon_state_path", lambda: state_path
+            "opencode_rate_limiter.daemon._state.get_daemon_state_path", lambda: state_path
         )
 
         rc = await cmd_check(Config(), argparse.Namespace(json=False))
@@ -662,7 +665,7 @@ class TestProbeHistory:
             encoding="utf-8",
         )
         monkeypatch.setattr(
-            "opencode_rate_limiter.daemon.get_daemon_state_path", lambda: state_path
+            "opencode_rate_limiter.daemon._state.get_daemon_state_path", lambda: state_path
         )
 
         rc = await cmd_check(Config(), argparse.Namespace(json=False))
@@ -1044,7 +1047,7 @@ class TestCheckTrendAndDiff:
             encoding="utf-8",
         )
         monkeypatch.setattr(
-            "opencode_rate_limiter.daemon.get_daemon_state_path", lambda: state_path
+            "opencode_rate_limiter.daemon._state.get_daemon_state_path", lambda: state_path
         )
 
         rc = await cmd_check(Config(), argparse.Namespace(json=False, trend=True))
@@ -1068,7 +1071,7 @@ class TestCheckTrendAndDiff:
             encoding="utf-8",
         )
         monkeypatch.setattr(
-            "opencode_rate_limiter.daemon.get_daemon_state_path", lambda: state_path
+            "opencode_rate_limiter.daemon._state.get_daemon_state_path", lambda: state_path
         )
         await cmd_check(Config(), argparse.Namespace(json=False, trend=False))
         out = capsys.readouterr().out
@@ -1092,7 +1095,8 @@ class TestProbeDiff:
     async def test_diff_reports_changes(self, tmp_path, monkeypatch, httpx_mock, capsys):
         self._state(tmp_path, {"m1": "rate_limited", "m2": "available"})
         monkeypatch.setattr(
-            "opencode_rate_limiter.daemon.get_daemon_state_path", lambda: tmp_path / "daemon.json"
+            "opencode_rate_limiter.daemon._state.get_daemon_state_path",
+            lambda: tmp_path / "daemon.json",
         )
         monkeypatch.setattr("opencode_rate_limiter.cli.get_opencode_version", lambda: "1.0")
         httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
@@ -1108,7 +1112,7 @@ class TestProbeDiff:
     @pytest.mark.asyncio
     async def test_no_diff_when_no_daemon_state(self, monkeypatch, httpx_mock, capsys, tmp_path):
         monkeypatch.setattr(
-            "opencode_rate_limiter.daemon.get_daemon_state_path",
+            "opencode_rate_limiter.daemon._state.get_daemon_state_path",
             lambda: tmp_path / "no.json",
         )
         monkeypatch.setattr("opencode_rate_limiter.cli.get_opencode_version", lambda: "1.0")

@@ -56,11 +56,11 @@ _opencode_rate_limiter() {
         '(-)'{${commands}} \
         '--strategy: :($strategies)'
         'check: :(--trend)'
-        'daemon: :(--interval --models)'
+        'daemon: :(--interval --models --once --stop)'
         'diagnose: :(--model)'
         'generate-config: :(--force)'
         'headers: :(--model --export)'
-        'rotate: :(--strategy --apply)'
+        'rotate: :(--strategy --to --apply)'
         'probe: :($probe_models)'
 }
 

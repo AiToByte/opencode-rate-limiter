@@ -1,5 +1,4 @@
-"""Probe daemon: periodic probing, 429 auto-cleanup/rotation, signal control,
-state persistence and single-instance locking."""
+"""Probe daemon runner: periodic probing, auto-cleanup/rotation, signals."""
 
 from __future__ import annotations
 
@@ -12,50 +11,36 @@ import os
 import random
 import signal
 import subprocess
-import sys
 import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Queue
-from typing import Any, cast
+from typing import Any
 
-from platformdirs import user_state_dir
-
-from .cleanup import CleanupManager
-from .config import Config
-from .headers import HeaderInjector
-from .paths import get_opencode_version
-from .pool import Account, AccountPool
-from .prober import ModelProber, ProbeResult
-
-
-def _now() -> _dt.datetime:
-    """Current UTC time (timezone-aware; persisted as ISO-8601)."""
-    return _dt.datetime.now(_dt.UTC)
-
-
-def _parse_cooldown_deadline(raw: Any) -> _dt.datetime | None:
-    """Parse a persisted cooldown deadline (aware ISO, trailing Z, or legacy naive)."""
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-    text = raw.strip()
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        moment = _dt.datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=_dt.UTC)
-    return moment.astimezone(_dt.UTC)
-
-
-def _now_iso() -> str:
-    """Current UTC timestamp in ISO-8601 Z format"""
-    return _dt.datetime.now(_dt.UTC).isoformat().replace("+00:00", "Z")
+from ..cleanup import CleanupManager
+from ..config import Config, ProberConfig
+from ..headers import HeaderInjector
+from ..paths import get_opencode_version
+from ..pool import Account, AccountPool
+from ..prober import ModelProber, ProbeResult
+from ._lock import (
+    DaemonLockError,
+    _flock_nonblocking,
+    _flock_path,
+    _funlock,
+    _pid_alive,
+    get_daemon_lock_path,
+)
+from ._state import (
+    DaemonStatus,
+    _now,
+    _now_iso,
+    _parse_cooldown_deadline,
+    load_daemon_state,
+    write_daemon_state,
+)
 
 
 def _make_signal_bridge(
@@ -67,91 +52,6 @@ def _make_signal_bridge(
         loop.call_soon_threadsafe(callback)
 
     return _bridge
-
-
-@dataclass
-class DaemonStatus:
-    """Runtime state snapshot for the daemon"""
-
-    running: bool = False
-    started_at: float = 0.0
-    last_probe: str = ""
-    next_probe: str = ""
-    last_cleanup: str = ""
-    total_cycles: int = 0
-    total_cleanups: int = 0
-    model_results: dict[str, ProbeResult] = field(default_factory=dict)
-    pool_health: dict[str, dict[str, Any]] = field(default_factory=dict)
-    history: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=20))
-    events: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=50))
-
-    def to_dict(self) -> dict[str, Any]:
-
-        uptime = 0
-        if self.running and self.started_at:
-            uptime = int(time.monotonic() - self.started_at)
-        return {
-            "running": self.running,
-            "uptime_seconds": uptime,
-            "last_probe": self.last_probe,
-            "next_probe": self.next_probe,
-            "last_cleanup": self.last_cleanup,
-            "total_cycles": self.total_cycles,
-            "total_cleanups": self.total_cleanups,
-            "models": {name: r.to_dict() for name, r in sorted(self.model_results.items())},
-            "pool_health": self.pool_health,
-            "history": list(self.history),
-            "events": list(self.events),
-        }
-
-
-class DaemonLockError(RuntimeError):
-    """Raised when another live daemon instance already holds the lock"""
-
-    def __init__(self, pid: int, lock_path: Path):
-        super().__init__(
-            f"another daemon instance appears to be running (pid {pid}, lock {lock_path})"
-        )
-        self.pid = pid
-        self.lock_path = lock_path
-
-
-def get_daemon_lock_path() -> Path:
-    """Path to the daemon's single-instance lock file"""
-    return Path(user_state_dir("opencode-rate-limiter")) / "daemon.lock"
-
-
-def _pid_alive(pid: int) -> bool:
-    """Check whether a process id is alive (cross-platform, never signals)"""
-    if pid <= 0:
-        return False
-    if sys.platform == "win32":
-        # os.kill(pid, 0) would TERMINATE the process on Windows, so query via ctypes
-        import ctypes
-
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000  # noqa: N806 - Win32 constant
-        STILL_ACTIVE = 259  # noqa: N806 - Win32 constant
-        # getattr (not attribute access): ctypes.windll only exists in the
-        # win32 stubs, so a plain access fails mypy on Linux CI while a
-        # suppression comment is flagged as unused on Windows.
-        kernel32 = getattr(ctypes, "windll").kernel32  # noqa: B009
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not handle:
-            return False
-        try:
-            exit_code = ctypes.c_ulong()
-            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-                return False
-            return exit_code.value == STILL_ACTIVE
-        finally:
-            kernel32.CloseHandle(handle)
-    import errno
-
-    try:
-        os.kill(pid, 0)
-    except OSError as e:
-        return e.errno == errno.EPERM
-    return True
 
 
 class RateLimiterDaemon:
@@ -173,6 +73,7 @@ class RateLimiterDaemon:
         self._state_path = state_path
         self._lock_path = lock_path
         self._lock_file: Path | None = None
+        self._lock_fh: Any = None
         self.log = logging.getLogger("daemon")
         self.status = DaemonStatus()
         self._running = False
@@ -205,10 +106,35 @@ class RateLimiterDaemon:
 
     def _rebuild(self) -> None:
         """(Re)build runtime components from current config"""
+        old_prober: ModelProber | None = getattr(self, "prober", None)
+        old_client = None
+        old_settings: tuple[float, ProberConfig] | None = None
+        if old_prober is not None and not old_prober._batch_active:
+            # Detach the warm client; ownership moves to the new prober when
+            # the probe settings are unchanged, else it is closed below.
+            old_client, old_prober._shared_client = old_prober._shared_client, None
+            old_settings = (old_prober.timeout, old_prober.config)
+        elif old_prober is not None:
+            # A probe batch is in flight (SIGHUP raced a cycle): leave the
+            # old client with the old prober rather than breaking the flight.
+            self.log.debug("Rebuild during active probe batch; old client left in place")
         version = get_opencode_version()
         self.injector = HeaderInjector(self.config.headers, version)
         self.headers = self.injector.build_headers()
         self.prober = ModelProber(self.config.daemon.probe_timeout_seconds, self.config.prober)
+        if old_client is not None:
+            if old_settings == (self.prober.timeout, self.prober.config):
+                self.prober._shared_client = old_client
+                old_client = None
+            else:
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop is not None:
+                    loop.create_task(old_client.aclose())
+                # Without a running loop (e.g. interpreter teardown) the
+                # detached client is left to the garbage collector.
         self.cleanup = CleanupManager(self.config.cleanup)
         self.pool = (
             AccountPool(self.config.account_pool) if self.config.account_pool.accounts else None
@@ -341,6 +267,7 @@ class RateLimiterDaemon:
             self._restore_signal_handlers()
             self._persist_state()
             self._release_lock()
+            await self.prober.aclose()
             self.log.info(
                 "Daemon stopped",
                 extra={
@@ -350,23 +277,37 @@ class RateLimiterDaemon:
             )
 
     def _acquire_lock(self) -> None:
-        """Create the single-instance lock file, taking over stale locks"""
+        """Take the single-instance lock and record our pid.
+
+        Mutual exclusion comes from the OS file lock held on the sentinel
+        file for the process lifetime (released by the OS itself on death,
+        so a held lock always means a live holder — no stale-lock race).
+        The pid file keeps its informational role and stays readable.
+        """
         lock_path = self._lock_path or get_daemon_lock_path()
         lock_path.parent.mkdir(parents=True, exist_ok=True)
+        sentinel = _flock_path(lock_path)
+        # Lifetime-held handle (released in _release_lock): SIM115 does not apply.
+        fh = open(sentinel, "a+b")  # noqa: SIM115
         try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
+            _flock_nonblocking(fh)
+        except BlockingIOError:
+            fh.close()
             existing = self._read_lock_pid(lock_path)
             if existing is not None and _pid_alive(existing):
                 raise DaemonLockError(existing, lock_path) from None
-            # Stale lock from a dead process - take over
-            self.log.warning("Removing stale daemon lock (pid %s)", existing)
-            with contextlib.suppress(OSError):
-                lock_path.unlink()
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(str(os.getpid()))
+            # Locked but the recorded pid is dead/garbled: some live holder
+            # exists (the OS would have released a dead holder's lock), so
+            # refuse rather than corrupt its state file.
+            raise DaemonLockError(existing or 0, lock_path) from None
+        # We hold the lock: a stale pid (dead process, corrupt content) can
+        # be safely overwritten — no live process can be using this file.
+        existing = self._read_lock_pid(lock_path)
+        if existing is not None and existing != os.getpid():
+            self.log.warning("Taking over stale daemon lock (pid %s)", existing)
+        lock_path.write_text(str(os.getpid()), encoding="utf-8")
         self._lock_file = lock_path
+        self._lock_fh = fh
 
     @staticmethod
     def _read_lock_pid(lock_path: Path) -> int | None:
@@ -376,12 +317,21 @@ class RateLimiterDaemon:
             return None
 
     def _release_lock(self) -> None:
-        """Remove the lock file only if we still own it"""
+        """Unlock, close and remove the lock files only if we still own them"""
+        fh = self._lock_fh
+        self._lock_fh = None
+        if fh is not None:
+            with contextlib.suppress(OSError):
+                _funlock(fh)
+            with contextlib.suppress(OSError):
+                fh.close()
         if self._lock_file is None:
             return
         if self._read_lock_pid(self._lock_file) == os.getpid():
             with contextlib.suppress(OSError):
                 self._lock_file.unlink()
+            with contextlib.suppress(OSError):
+                _flock_path(self._lock_file).unlink()
         self._lock_file = None
 
     async def _wait(self, interval: int) -> None:
@@ -412,19 +362,23 @@ class RateLimiterDaemon:
             return None
         now = time.monotonic()
         for _ in range(len(self.pool.accounts)):
-            account = self.pool.get_next()
+            account = self.pool.get_next(record=False)
             if account is None:
                 return None
             if self._key_cooldowns.get(account.name, 0) <= now:
+                self.pool.note_served(account)
                 return account
         return None
 
-    async def _probe_cycle(self) -> None:
+    async def _probe_cycle(self) -> list[ProbeResult]:
 
         now = time.monotonic()
         models = self._effective_models()
         self.status.total_cycles += 1
         self.status.last_probe = _now_iso()
+        # The pooled client lives across cycles (opened once, closed at
+        # shutdown) so keep-alive connections survive between probes.
+        self.prober.open()
 
         # Per-model rate-limit cooldown: skip models whose cooldown window has
         # not elapsed yet to avoid burning quota on known-limited models.
@@ -455,7 +409,7 @@ class RateLimiterDaemon:
             )
             self._record_event("budget_exhausted", budget=budget, used=self._probe_count)
             self._persist_state()
-            return
+            return []
         if budget:
             remaining = budget - self._probe_count
             if len(active) > remaining:
@@ -576,6 +530,22 @@ class RateLimiterDaemon:
         )
         self.status.next_probe = next_ts.isoformat().replace("+00:00", "Z")
         self._persist_state()
+        return results
+
+    async def run_once(self) -> list[ProbeResult]:
+        """Run a single probe cycle and exit (cron / Task Scheduler friendly).
+
+        Takes the single-instance lock so a one-shot run never races a live
+        daemon over the state file; exit-code mapping is the caller's job.
+        """
+        self._load_runtime_state()
+        self._acquire_lock()
+        try:
+            return await self._probe_cycle()
+        finally:
+            self._persist_state()
+            self._release_lock()
+            await self.prober.aclose()
 
     def _backoff_multiplier(self) -> int:
         """Exponential wait multiplier after consecutive all-error cycles (cap 8x)"""
@@ -609,11 +579,13 @@ class RateLimiterDaemon:
             },
         )
 
-        # Mark the account that actually served this model as failing, then
-        # rotate away from it (when pool has 2+)
+        # Mark the account that actually served this model as failing and
+        # rotate away from it. The rotation itself happens lazily: the next
+        # probe cycle picks a fresh account (consuming the round-robin cursor
+        # exactly once per pick), so no extra get_next() here.
         if self.pool is not None:
-            current = self.pool.get_current()
-            name = account_name or (current.name if current is not None else None)
+            served = self.pool.last_served
+            name = account_name or (served.name if served is not None else None)
             if name is not None:
                 self.pool.mark_result(
                     name,
@@ -635,23 +607,20 @@ class RateLimiterDaemon:
                             "error_type": result.error_type,
                         },
                     )
-            if len(self.pool.accounts) > 1:
-                next_account = self.pool.get_next()
-                if next_account is not None:
-                    self._record_event(
-                        "rotation",
-                        model=result.model,
-                        **{"from": name},
-                        to=next_account.name,
-                    )
-                    self.log.info(
-                        "Account rotated",
-                        extra={
-                            "from": name,
-                            "to": next_account.name,
-                            "strategy": self.config.account_pool.strategy,
-                        },
-                    )
+            if len(self.pool.accounts) > 1 and name is not None:
+                self._record_event(
+                    "rotation",
+                    model=result.model,
+                    **{"from": name},
+                    reason="rate_limited",
+                )
+                self.log.info(
+                    "Account rotated away",
+                    extra={
+                        "from": name,
+                        "strategy": self.config.account_pool.strategy,
+                    },
+                )
 
         # Note: the auto-cleanup itself runs once per probe cycle (see
         # _probe_cycle), not once per rate-limited model.
@@ -731,35 +700,3 @@ class RateLimiterDaemon:
             "Config reloaded",
             extra={"interval": self._effective_interval(), "models": len(self._effective_models())},
         )
-
-
-def get_daemon_state_path() -> Path:
-    """Path to the daemon's persisted state file"""
-    return Path(user_state_dir("opencode-rate-limiter")) / "daemon.json"
-
-
-def write_daemon_state(data: dict[str, Any], path: Path | None = None) -> None:
-    """Atomically persist daemon state to disk"""
-    target = path or get_daemon_state_path()
-    log = logging.getLogger("daemon")
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        tmp.replace(target)
-    except OSError as e:
-        log.debug("Failed to write daemon state: %s", e)
-
-
-def load_daemon_state(path: Path | None = None) -> dict[str, Any] | None:
-    """Read the daemon's persisted state file, if present"""
-    target = path or get_daemon_state_path()
-    if not target.exists():
-        return None
-    try:
-        with open(target, encoding="utf-8") as f:
-            return cast("dict[str, Any]", json.load(f))
-    except (json.JSONDecodeError, OSError) as e:
-        logging.getLogger("main").debug("Failed to read daemon state: %s", e)
-        return None

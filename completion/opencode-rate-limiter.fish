@@ -53,6 +53,8 @@ complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from check" \
 complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from daemon" \
     -l interval
     -l models
+    -l once
+    -l stop
 complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from diagnose" \
     -l model
 complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from generate-config" \
@@ -61,6 +63,7 @@ complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from headers" \
     -l model
     -l export
 complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from rotate" \
+    -l to
     -l apply
 complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from rotate" -l strategy -a "(__fish_opencode_rate_limiter_strategies)"
 

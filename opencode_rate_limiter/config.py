@@ -112,6 +112,8 @@ class AccountPoolConfig:
                 raise ValueError(
                     f"accounts[{i}] missing auth source (auth_path, env_var, or auth_json)"
                 )
+            if "kind" in acc and acc["kind"] not in ("oauth", "api"):
+                raise ValueError(f"accounts[{i}].kind must be 'oauth' or 'api'")
         names = [str(acc.get("name")) for acc in self.accounts if isinstance(acc, dict)]
         if len(set(names)) != len(names):
             dupes = sorted({n for n in names if names.count(n) > 1})
@@ -129,6 +131,10 @@ class ProberConfig:
     proxy: str | None = None
     http2: bool = False
     connection_pool_size: int = 8
+    # Immediate retries for transient network failures only (connect
+    # errors / timeouts). HTTP statuses — including 429 — are never
+    # retried: 429 burns quota and is handled by daemon cooldowns instead.
+    max_retries: int = 0
 
     def validate(self) -> None:
         if not self.endpoint.startswith(("http://", "https://")):
@@ -139,6 +145,8 @@ class ProberConfig:
             raise ValueError(
                 f"prober.connection_pool_size must be >= 1, got {self.connection_pool_size}"
             )
+        if self.max_retries < 0:
+            raise ValueError(f"prober.max_retries must be >= 0, got {self.max_retries}")
 
 
 @dataclass
@@ -165,6 +173,32 @@ class CleanupConfig:
     def validate(self) -> None:
         if not self.preserve_config:
             raise ValueError("preserve_config must be true (protects user config.json)")
+
+
+def _match_section(sections: dict[str, Any], name: Any) -> Any | None:
+    """Resolve a section name: exact match first, case-insensitive fallback."""
+    if not isinstance(name, str):
+        return None
+    if name in sections:
+        return sections[name]
+    lowered = name.lower()
+    for section_name, target in sections.items():
+        if section_name.lower() == lowered:
+            return target
+    return None
+
+
+def _match_field(target: object, key: Any) -> str | None:
+    """Resolve a field name against a config object, preferring exact case."""
+    if not isinstance(key, str):
+        return None
+    if hasattr(target, key):
+        return key
+    lowered = key.lower()
+    for attr in vars(target):
+        if attr.lower() == lowered:
+            return attr
+    return None
 
 
 @dataclass
@@ -289,15 +323,20 @@ class Config:
 
     @staticmethod
     def _merge_value(current_value: Any, new_value: Any) -> Any:
-        """Merge a config value: nested tables deep-merge, everything else coerces
+        """Merge a config value: nested tables merge recursively, everything
+        else coerces.
 
-        Deep merging lets partial tables (e.g. only two of the three
+        Recursive merging lets partial tables (e.g. only two of the three
         score_weights) override defaults instead of replacing them; a full
         replacement is still possible by specifying every key.
         """
         if isinstance(current_value, dict) and isinstance(new_value, dict):
             merged = dict(current_value)
-            merged.update(new_value)
+            for key, value in new_value.items():
+                if key in merged:
+                    merged[key] = Config._merge_value(merged[key], value)
+                else:
+                    merged[key] = value
             return merged
         return Config._coerce_value(current_value, new_value)
 
@@ -325,40 +364,22 @@ class Config:
             cleanup=copy.deepcopy(base.cleanup),
         )
 
-        # Merge daemon
-        if "daemon" in override:
-            for k, v in override["daemon"].items():
-                if hasattr(result.daemon, k):
-                    current = getattr(result.daemon, k)
-                    setattr(result.daemon, k, cls._merge_value(current, v))
-
-        # Merge account_pool
-        if "account_pool" in override:
-            for k, v in override["account_pool"].items():
-                if hasattr(result.account_pool, k):
-                    current = getattr(result.account_pool, k)
-                    setattr(result.account_pool, k, cls._merge_value(current, v))
-
-        # Merge prober
-        if "prober" in override:
-            for k, v in override["prober"].items():
-                if hasattr(result.prober, k):
-                    current = getattr(result.prober, k)
-                    setattr(result.prober, k, cls._merge_value(current, v))
-
-        # Merge headers
-        if "headers" in override:
-            for k, v in override["headers"].items():
-                if hasattr(result.headers, k):
-                    current = getattr(result.headers, k)
-                    setattr(result.headers, k, cls._merge_value(current, v))
-
-        # Merge cleanup
-        if "cleanup" in override:
-            for k, v in override["cleanup"].items():
-                if hasattr(result.cleanup, k):
-                    current = getattr(result.cleanup, k)
-                    setattr(result.cleanup, k, cls._merge_value(current, v))
+        sections: dict[str, Any] = {
+            "daemon": result.daemon,
+            "account_pool": result.account_pool,
+            "prober": result.prober,
+            "headers": result.headers,
+            "cleanup": result.cleanup,
+        }
+        for section_name, values in override.items():
+            target = _match_section(sections, section_name)
+            if target is None or not isinstance(values, dict):
+                continue
+            for key, value in values.items():
+                attr = _match_field(target, key)
+                if attr is not None:
+                    current = getattr(target, attr)
+                    setattr(target, attr, cls._merge_value(current, value))
 
         return result
 
@@ -442,6 +463,7 @@ class Config:
                 "extra_headers": self.prober.extra_headers,
                 "http2": self.prober.http2,
                 "connection_pool_size": self.prober.connection_pool_size,
+                "max_retries": self.prober.max_retries,
                 # tomli_w cannot serialize None; omit proxy when unset
                 **({"proxy": self.prober.proxy} if self.prober.proxy else {}),
             },

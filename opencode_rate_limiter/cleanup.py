@@ -33,15 +33,21 @@ def _timestamp_suffix() -> str:
 
 @dataclass
 class CleanupResult:
-    """Result of a cleanup operation"""
+    """Result of a cleanup operation
+
+    `cleared_count` counts real mutations; dry-run previews count into
+    `would_clear_count` instead so previews never inflate the real metric.
+    """
 
     cleared_count: int = 0
+    would_clear_count: int = 0
     errors: list[str] = field(default_factory=list)
     details: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "cleared_count": self.cleared_count,
+            "would_clear_count": self.would_clear_count,
             "errors": self.errors,
             "details": self.details,
         }
@@ -76,7 +82,7 @@ class CleanupManager:
 
             if dry_run:
                 result.details.append(f"DRY RUN: Would back up {auth_file}")
-                result.cleared_count += 1
+                result.would_clear_count += 1
                 continue
 
             try:
@@ -108,7 +114,7 @@ class CleanupManager:
 
             if dry_run:
                 result.details.append(f"DRY RUN: Would remove {cache_path}")
-                result.cleared_count += 1
+                result.would_clear_count += 1
                 continue
 
             try:
@@ -135,12 +141,14 @@ class CleanupManager:
 
         r1 = self.backup_auth_files(dry_run=dry_run)
         result.cleared_count += r1.cleared_count
+        result.would_clear_count += r1.would_clear_count
         result.errors.extend(r1.errors)
         result.details.extend(r1.details)
 
         if include_cache:
             r2 = self.purge_cache(dry_run=dry_run)
             result.cleared_count += r2.cleared_count
+            result.would_clear_count += r2.would_clear_count
             result.errors.extend(r2.errors)
             result.details.extend(r2.details)
 

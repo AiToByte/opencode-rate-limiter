@@ -7,6 +7,72 @@ All notable changes to opencode-rate-limiter will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-14
+
+### Added
+
+- **`daemon --once`**：单轮巡检模式——恢复状态、拿单实例锁、跑一轮探测、
+  持久化、放锁、关连接后退出；退出码沿 `probe` 语义（有 rate_limited 即 1）。
+  cron / 任务计划无需常驻进程即可定期巡检。
+- **`rotate --to NAME`**：故障逃生直切指定账号（大小写敏感），跳过策略选择；
+  JSON/日志带 `explicit` 标记；未知名报错并列出可用账号（退出码 1）。
+- **`daemon --stop`**：读锁文件 pid 发 SIGTERM 并等待最多 10s；无锁 / 过期锁 /
+  停止成功退出码 0，超时 1；锁属当前进程时拒绝（防自杀）。Windows 同样可用
+  （`os.kill` 语义为终止）。
+- **`[prober].max_retries`**（默认 0）：仅连接失败/连接超时/读取超时即时重试；
+  HTTP 状态（含 429）永不重试——429 走冷却，烧配额的重试是 bug。
+
+### Changed
+
+- **探测连接跨周期复用**：daemon 常驻一个池化 `AsyncClient`（`ModelProber.open()`
+  幂等启用，`aclose()` 关闭）；`probe_all()` 有常驻连接则复用，否则回退
+  批作用域连接；SIGHUP 重载按探测配置是否变化决定转移暖连接还是关闭重建
+  （重载撞上在途批次时不断其连接）。
+- **`daemon.py` 拆为 `daemon/` 包**：`_lock`（单实例锁）/ `_state`（持久化）/
+  `_runner`（主循环）；包 `__init__` 全量再导出，`from ...daemon import ...`
+  与测试 patch 点保持兼容（含 `daemon._state.get_daemon_state_path`）。
+- **auth 读取缓存**：按文件 (mtime_ns, size) / env 原始值 / inline 原文感知变化，
+  daemon 每轮重复读盘消除；`invalidate_auth_cache()` 供测试与轮换。
+- **版本单源确权**：`meta.py` 静态字符串为唯一事实来源（注释声明），
+  `check_version.py` CI 硬门禁守漂移。
+
+### Fixed
+
+- **`_probe_cycle` 预算耗尽分支补返回值**（签名改为返回本轮结果列表，
+  `run_once` 与退出码映射依赖它）。
+
+## [0.4.1] - 2026-09-14
+
+### Fixed
+
+- **单实例锁竞态**：互斥改由哨兵文件上的 OS 文件锁（POSIX `flock` /
+  Windows `msvcrt.locking`，进程持有至退出）承担，pid 文件只保留信息展示；
+  双启动不再能穿过读 pid/unlink 窗口双跑；过期/损坏锁仍安全接管。
+- **轮换归因与双重消费**：`AccountPool` 新增 `last_served`（`get_next(record=False)`
+  支持 peek 式跳过），`_handle_rate_limited` 改用实际服务账号归因，不再为
+  记一笔失败而多消费一次 round-robin 游标；`get_current()` 语义修正为"最近服务"。
+- **`kind` 覆盖校验**：`accounts[].kind` 限定 `oauth`/`api`，拼写错误在
+  `validate` 直接拒绝（override-wins 语义不变）。
+- **递归深合并**：`_merge_value` 递归合并嵌套表；section/字段名精确匹配优先、
+  大小写不敏感回退。
+- **dry-run 计数诚实化**：`CleanupResult` 新增 `would_clear_count`，
+  预览不再虚增 `cleared_count`；人读输出 dry-run 时分开展示。
+- **超时细分**：连接失败（`connect failed`）/ 连接超时（`connect timeout`）/
+  读取超时（`read timeout`）分别报告，指向不同排障方向。
+- **错误体上限**：`Content-Length` 超 64KB 的响应不再全量解析 `error.type`。
+- **`probe_all` 重入守卫**：同实例重叠调用直接抛明确错误，不再静默互盖 client。
+- **NO_PROXY 判定可测**：抽 `endpoint_bypassed_by_no_proxy()` 纯函数，
+  覆盖 None/空/通配/命中/未命中。
+- **版本缓存跨测试污染**：`test_opencode_version_empty_env_falls_back`
+  先清缓存（实现侧：`OPENCODE_VERSION` 空值本就直通检测）。
+
+### Changed
+
+- **man 页勘误**：`state.json` 不再称"含退避信息"；`quick` 示例不再称"解除限流"；
+  退出码表按实现修正为 0/1/2/130。
+- **release 流水线测试门**：补 ruff / format / mypy，与 CI 对齐。
+- **测试基线**：265 passed（新增 `tests/test_0_4_1.py` 6 项 + 超时细分等）。
+
 ## [0.4.0] - 2026-09-14
 
 ### Added

@@ -96,6 +96,12 @@ Examples:
         help="选择策略；省略时使用配置文件中的 strategy",
     )
     rotate_p.add_argument(
+        "--to",
+        metavar="NAME",
+        default=None,
+        help="直接选中指定账号（大小写敏感），跳过策略选择",
+    )
+    rotate_p.add_argument(
         "--apply",
         action="store_true",
         help="把选中账号的 auth JSON 写入 OpenCode auth.json（先备份；需搭配 --dry-run 预览）",
@@ -110,6 +116,11 @@ Examples:
     daemon_p = add_sub("daemon", "后台守护进程模式")
     daemon_p.add_argument("--interval", type=int, default=None, help="探测间隔（秒，最小 5）")
     daemon_p.add_argument("--models", type=str, help="逗号分隔的模型列表")
+    daemon_mode = daemon_p.add_mutually_exclusive_group()
+    daemon_mode.add_argument(
+        "--once", action="store_true", help="只跑一轮探测就退出（cron/任务计划友好）"
+    )
+    daemon_mode.add_argument("--stop", action="store_true", help="优雅停止正在运行的守护进程后退出")
 
     add_sub("generate-systemd", "生成 systemd 服务文件")
     add_sub("generate-launchd", "生成 launchd plist")

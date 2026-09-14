@@ -1,6 +1,6 @@
 # opencode-rate-limiter 技术架构文档
 
-版本：0.4.0（2026-09） · 适用代码：`opencode_rate_limiter/` 包（当前 main）
+版本：0.5.0（2026-09） · 适用代码：`opencode_rate_limiter/` 包（当前 main）
 
 > 本文回答"系统为什么长这样"。实现层面的"怎么做的"见 [implementation.md](implementation.md)，
 > 功能层面的"能做什么"见 [features.md](features.md)，操作层面的"怎么用"见
@@ -38,18 +38,19 @@
               ┌───────────────┼───────────────────────┐
               ▼               ▼                       ▼
       ┌──────────────┐ ┌─────────────┐      ┌──────────────────┐
-      │ parser.py    │ │ completions │      │ daemon.py        │
-      │ build_parser │ │ (生成补全)  │      │ RateLimiterDaemon│
-      └──────┬───────┘ └──────┬──────┘      │ 单实例锁/状态持久化│
-             │                │             └───────┬──────────┘
-             │                │                     │
-             ▼                ▼                     ▼
+      │ parser.py    │ │ completions │      │ daemon/ 包       │
+      │ build_parser │ │ (生成补全)  │      │ _runner/_lock/   │
+      └──────┬───────┘ └──────┬──────┘      │ _state           │
+              │                │             └───────┬──────────┘
+              │                │                     │
+              ▼                ▼                     ▼
       ┌──────────────────────────────────────────────────────┐
       │ 服务层                                                │
-      │  prober.py    ModelProber / ProbeResult（共享客户端）  │
+      │  prober.py    ModelProber / ProbeResult（跨周期长连接） │
       │  pool.py      AccountPool / AccountHealth（滑动窗口）  │
       │  cleanup.py   CleanupManager（auth 备份/缓存维护）     │
       │  diagnostics  run_diagnostics / Finding（诊断报告）    │
+      │  render.py    check/probe 人读渲染（cli 兼容重导出）   │
       └──────────────────────┬───────────────────────────────┘
                              ▼
       ┌──────────────────────────────────────────────────────┐
@@ -74,10 +75,11 @@
 | `pool` | 账号池：auth 解析（真实 opencode 结构）、三策略轮换、滑动窗口健康度 | config |
 | `cleanup` | auth 备份、缓存目录维护 | paths / config |
 | `logs` | JSON Lines（真 UTC）与人读日志、Windows GBK 编码防护 | 标准库 |
-| `daemon` | 周期探测编排、冷却/预算/退避、信号控制、单实例锁、状态持久化 | 上述全部 |
+| `daemon/` | 包：`_runner`（周期编排）/`_lock`（单实例锁）/`_state`（持久化）；公共导入不变 | 上述全部 |
+| `render` | `check`/`probe` 人读渲染（trend/events/diff） | daemon（读状态）/ pool |
 | `service` | systemd / launchd / Windows 任务计划文件模板 | platformdirs |
 | `parser` | argparse 树、结构化命令（banner 抑制）清单 | meta |
-| `completions` | 从**真实 parser** 派生 bash/zsh/fish 补全 | parser / config |
+| `completions` | 从**真实 parser** 派生 bash/zsh/fish/powershell 补全 | parser / config |
 | `diagnostics` | 出口 IP / 代理环境 / 429 分层诊断报告 | httpx / prober / paths / pool |
 
 ## 3. 核心数据流
@@ -100,10 +102,11 @@ main()
 ```
 run()
   → _load_probe_usage()                # 跨重启恢复每日探测预算计数
-  → _acquire_lock()                    # O_CREAT|O_EXCL；存活实例→拒绝；死进程→接管
+  → _acquire_lock()                    # 哨兵 .flock 上 OS 文件锁；被占+存活→拒绝；过期→接管
   → _install_signal_handlers()         # loop.add_signal_handler，win32 回退 signal.signal 桥接
   → loop:
       _probe_cycle():
+        0) prober.open() 跨周期长连接      # SIGHUP 按配置变更转移/关闭
         1) 冷却过滤（respect_cooldown）      # 429 过的模型在 retry-after 内跳过
         2) 每日预算裁剪（daily_probe_budget）# 耗尽则整轮跳过
         3) 按策略为每个模型选账号 → 注入 Bearer token
@@ -140,9 +143,14 @@ run_diagnostics()
 | 429 应对 | 无条件重试 / 本地清锁 | **冷却期（retry-after / UTC 午夜）+ 指数退避 + 每轮至多一次清理**。C1/C3：只有等待与换 IP 有效，工具的职责是别浪费配额 |
 | 清理功能 | 删锁/删 state/token 手术 | **诚实化：纯备份 + 缓存维护**。源码核实目标文件不存在，删除虚构文件是伪功能且有害（token 手术会登出用户） |
 | 账号池价值 | 宣称免费场景轮换 | **限定付费 key / BYOK 维度**。C4：免费配额键是 IP；文档与诊断均明示 |
-| 单实例锁 | 无 / 文件锁库 | **O_EXCL 锁文件 + 自研存活检测**（win32 `OpenProcess`，POSIX `kill 0`），零新依赖；死进程锁自动接管 |
+| 单实例锁（初版） | 无 / 文件锁库 | O_EXCL 锁文件 + 自研存活检测（v0.4.1 起被哨兵 OS 文件锁取代，见下） |
 | 诊断能力 | 只看 HTTP 状态码 | **解析响应体 `error.type`** 分层定位（IP 配额 / key RPM / 上游错误 / 鉴权），配合出口 IP 核实——直接回答"换节点/换账号为什么没用" |
 | 补全生成 | 手写脚本 | **从真实 argparse parser 派生**，命令/选项/模型列表单一数据源，永不漂移 |
+| 探测连接 | 每轮新建 AsyncClient | **daemon 常驻长连接**（SIGHUP 按配置变更转移/关闭），跨周期 keep-alive；`--once`/CLI 仍用批作用域连接 |
+| daemon 规模 | 800+ 行单文件 | **拆为 `_lock`/`_state`/`_runner` 包**，`daemon/__init__` 全量再导出，调用方与测试 patch 点保持兼容 |
+| 429 后轮换 | 记失败时再 `get_next` 一次 | **惰性轮换**：归因用 `last_served`，下一轮自然取新账号；round-robin 游标每轮只消费一次 |
+| 单实例锁 | O_EXCL + pid 存活检测 | **哨兵文件 OS 文件锁**（进程死亡 OS 自动释放=永不 stale）+ pid 文件信息展示；Windows 字节锁要求哨兵与 pid 分离 |
+| 重试 | 无（daemon 层承担） | **`[prober].max_retries` 仅瞬时网络错**，HTTP 状态（含 429）永不重试——429 走冷却，烧配额的重试是 bug |
 
 ## 5. 状态与持久化
 

@@ -1,6 +1,6 @@
 # opencode-rate-limiter 技术实现细节文档
 
-版本：0.4.0（2026-09） · 配套：[architecture.md](architecture.md)（为什么） ·
+版本：0.5.0（2026-09） · 配套：[architecture.md](architecture.md)（为什么） ·
 本文讲"具体怎么实现的"，函数/字段名与当前代码一致。
 
 ---
@@ -117,29 +117,34 @@ bool 目标接受 "true/1/yes"；int/float 目标直接 `int(new)`/`float(new)`�
 - `mark_result()`：total±、窗口 append、失败时 `consecutive_failures+=1` 并刷新
   `last_error_time`；成功清零连击、EMA 更新延迟（新值权重 0.2）。
 
-## 4. 守护进程（daemon.py）
+## 4. 守护进程（`daemon/` 包：`_runner` / `_lock` / `_state`）
 
 ### 4.1 启动序列
 
 `run()`：`_load_probe_usage()`（从状态文件恢复 `_probe_day/_probe_count`，容忍
 缺字段/坏类型）→ `_acquire_lock()` → `_install_signal_handlers()` → 循环 →
-`finally` 还原信号、写状态、释放锁。
+`finally` 还原信号、写状态、释放锁、关闭长连接。`run_once()`（`daemon --once`）
+是单轮版本：恢复状态 → 拿锁 → 一轮 `_probe_cycle` → 持久化 → 放锁 → 关连接。
 
 ### 4.2 `_probe_cycle` 的九步流水
 
 实现按固定顺序执行（顺序本身是语义）：
 
+0. **长连接**：`prober.open()` 确保持久化 client 存在（跨周期复用；SIGHUP
+   按探测配置是否变化决定转移暖连接还是关闭重建）。
 1. **冷却过滤**：`respect_cooldown` 时剔除 `_cooldowns` 未到期的模型（monotonic
    时钟），命中打 INFO（含剩余秒数）。
 2. **预算**：UTC 日串（`%Y%m%d`）变更即清零计数；`daily_probe_budget` 用尽→
-   WARNING + `_persist_state()` + 直接 return（周期计数仍 +1）；未用尽但剩余
-   不足以覆盖全部 active 模型时**裁剪列表**。
+   WARNING + `_persist_state()` + 直接返回空列表（周期计数仍 +1）；未用尽但剩余
+   不足以覆盖全部 active 模型时**轮转裁剪列表**（游标 `_budget_cursor` 防尾部饥饿）。
 3. **账号选择**：对每个 active 模型 `pool.get_next()`；`resolve_token` 成功则
    `headers_by_model[model] = injector.build_headers(token=...)`。
 4. `probe_all(active, headers, headers_by_model or None)`；`_probe_count += len(results)`。
 5. 结果回写：`model_results` 更新 + 日志；非 rate_limited 结果 `mark_result`。
-6. 429 处理：逐个 `_handle_rate_limited(result, account_name)`（只做失败标记 +
-   轮换日志）；随后**每轮至多一次** `asyncio.to_thread(self.cleanup.full_cleanup)`。
+6. 429 处理：逐个 `_handle_rate_limited(result, account_name)`——只做失败标记
+   （归因对象是 `last_served`/传入的实际服务账号）+ `rotation` 事件（惰性轮换，
+   下一轮自然取新账号，不 double 消费游标）；随后**每轮至多一次**
+   `asyncio.to_thread(self.cleanup.full_cleanup)`。
 7. 冷却布防：对 rate_limited 模型 `cooldown = monotonic + (retry_after or
    estimated_reset)`；探测正常（含 available/error）的模型解除冷却。
 8. 退避：全 error 连击 `_error_streak+=1` 否则清零；`_backoff_multiplier()` =
@@ -165,9 +170,10 @@ None 自然跳过。
 
 ### 4.5 单实例锁
 
-- 获取：`os.open(lock, O_CREAT|O_EXCL|O_WRONLY)`；`FileExistsError` 时读 pid，
-  `_pid_alive(pid)` 为真 → `DaemonLockError`（exit 1）；否则视为 stale，unlink 后
-  重建。锁内容 = 自己的 pid。
+- 获取：在哨兵 `.flock` 上 `flock`/`msvcrt.locking` 非阻塞加独占锁（进程持有至
+  退出；OS 在进程死亡时自动释放——被占住即代表活持有者，无竞态）；成功后把
+  pid 写入 `daemon.lock`（过期 pid 直接覆盖并 warning）。被占且 pid 存活 →
+  `DaemonLockError`（exit 1）；被占但 pid 已死/损坏 → 拒绝（不可损坏活持有者状态）。
 - `_pid_alive`：win32 走 `ctypes` 的 `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`
   + `GetExitCodeProcess`（**绝不用 `os.kill(pid,0)`——Windows 上那会终止目标进程**）；
   POSIX 用 `kill(pid,0)`，`EPERM` 视为存活。

@@ -192,20 +192,33 @@ class AccountPool:
             for acc in self.accounts
         }
         self._current_index = 0
+        self._last_served: Account | None = None
+        # Auth read cache: ("path", str) -> ((mtime_ns, size), data),
+        # ("env", var) -> (raw_value, data), ("json", payload) -> data.
+        # Files invalidate on mtime/size change; env/inline on value change.
+        self._auth_cache: dict[tuple[str, str], tuple[Any, Any]] = {}
         self.log = logging.getLogger("pool")
 
-    def get_next(self) -> Account | None:
-        """Get next account based on strategy"""
+    def get_next(self, record: bool = True) -> Account | None:
+        """Get next account based on strategy.
+
+        When `record` is true (default) the pick is stored as `last_served`;
+        pass False for speculative picks (e.g. skipping cooled accounts).
+        """
         if not self.accounts:
             return None
 
         if self.config.strategy == "round_robin":
-            return self._round_robin()
+            account: Account | None = self._round_robin()
         elif self.config.strategy == "least_used":
-            return self._least_used()
+            account = self._least_used()
         elif self.config.strategy == "health":
-            return self._healthiest()
-        return None
+            account = self._healthiest()
+        else:
+            return None
+        if record:
+            self._last_served = account
+        return account
 
     def _round_robin(self) -> Account:
         account = self.accounts[self._current_index % len(self.accounts)]
@@ -265,33 +278,61 @@ class AccountPool:
                 h.key_limited_count += 1
 
     def read_auth(self, account: Account) -> dict[str, Any] | None:
-        """Read auth data from account source"""
+        """Read auth data from account source (with change-aware caching)"""
 
         if account.auth_json:
+            key = ("json", account.auth_json)
+            cached = self._auth_cache.get(key)
+            if cached is not None:
+                return cast("dict[str, Any] | None", cached[1])
             try:
-                return cast("dict[str, Any]", json.loads(account.auth_json))
+                data: dict[str, Any] | None = cast("dict[str, Any]", json.loads(account.auth_json))
             except json.JSONDecodeError:
-                return None
+                data = None
+            self._auth_cache[key] = (None, data)
+            return data
 
         if account.env_var:
             raw = os.environ.get(account.env_var)
-            if raw:
-                try:
-                    return cast("dict[str, Any]", json.loads(raw))
-                except json.JSONDecodeError:
-                    return None
-            return None
+            if not raw:
+                return None
+            key = ("env", account.env_var)
+            cached = self._auth_cache.get(key)
+            if cached is not None and cached[0] == raw:
+                return cast("dict[str, Any] | None", cached[1])
+            try:
+                data = cast("dict[str, Any]", json.loads(raw))
+            except json.JSONDecodeError:
+                data = None
+            self._auth_cache[key] = (raw, data)
+            return data
 
         if account.auth_path:
             path = Path(os.path.expandvars(str(Path(account.auth_path).expanduser())))
-            if path.exists():
-                try:
-                    with open(path, encoding="utf-8") as f:
-                        return cast("dict[str, Any]", json.load(f))
-                except (json.JSONDecodeError, OSError):
-                    return None
+            if not path.exists():
+                return None
+            try:
+                stat = path.stat()
+                freshness = (stat.st_mtime_ns, stat.st_size)
+            except OSError:
+                return None
+            key = ("path", str(path))
+            cached = self._auth_cache.get(key)
+            if cached is not None and cached[0] == freshness:
+                return cast("dict[str, Any] | None", cached[1])
+            try:
+                with open(path, encoding="utf-8") as f:
+                    data = cast("dict[str, Any]", json.load(f))
+            except (json.JSONDecodeError, OSError):
+                return None
+            self._auth_cache[key] = (freshness, data)
+            return data
 
         return None
+
+    def invalidate_auth_cache(self) -> None:
+        """Drop all cached auth payloads (tests, credential rotation)."""
+        self._auth_cache.clear()
 
     def resolve_credential(self, account: Account) -> tuple[str, str] | None:
         """Read auth data and classify it as (kind, token)
@@ -311,8 +352,21 @@ class AccountPool:
         credential = self.resolve_credential(account)
         return credential[1] if credential else None
 
+    def note_served(self, account: Account) -> None:
+        """Record an account as most recently served (for peek-style picks)."""
+        self._last_served = account
+
     def get_current(self) -> Account | None:
-        """Get current active account"""
+        """Get the account that most recently served a request.
+
+        Falls back to the first account before anything was served (and None
+        for an empty pool). Prefer `last_served` for new code.
+        """
         if not self.accounts:
             return None
-        return self.accounts[min(self._current_index, len(self.accounts) - 1)]
+        return self._last_served or self.accounts[0]
+
+    @property
+    def last_served(self) -> Account | None:
+        """The account returned by the most recent `get_next()` call, if any."""
+        return self._last_served

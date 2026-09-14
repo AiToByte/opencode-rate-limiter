@@ -39,6 +39,12 @@ jobs:
           version: "latest"
       - name: Install dependencies
         run: uv sync --dev --all-extras
+      - name: Ruff check
+        run: uv run ruff check .
+      - name: Ruff format check
+        run: uv run ruff format --check .
+      - name: Mypy (strict)
+        run: uv run mypy .
       - name: Run tests
         run: uv run pytest -q
 

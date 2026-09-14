@@ -151,7 +151,44 @@ class TestModelProber:
         prober = ModelProber(10.0)
         result = await prober.probe("model", {})
         assert result.status == "error"
-        assert result.error == "timeout"
+        assert result.error == "read timeout"
+
+    @pytest.mark.asyncio
+    async def test_probe_connect_timeout(self, httpx_mock):
+        import httpx as _httpx
+
+        httpx_mock.add_exception(_httpx.ConnectTimeout("connect timed out"))
+        prober = ModelProber(10.0)
+        result = await prober.probe("model", {})
+        assert result.status == "error"
+        assert result.error == "connect timeout"
+
+    @pytest.mark.asyncio
+    async def test_probe_retries_transient_then_succeeds(self, httpx_mock):
+        import httpx as _httpx
+
+        from opencode_rate_limiter import ProberConfig
+
+        httpx_mock.add_exception(_httpx.ConnectError("refused"))
+        httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
+        prober = ModelProber(10.0, ProberConfig(max_retries=1))
+        result = await prober.probe("model", {})
+        assert result.status == "available"
+        assert len(httpx_mock.get_requests()) == 2
+
+    @pytest.mark.asyncio
+    async def test_probe_never_retries_429(self, httpx_mock):
+        from opencode_rate_limiter import ProberConfig
+
+        httpx_mock.add_response(
+            url=ModelProber.ZEN_ENDPOINT,
+            status_code=429,
+            json={"error": {"type": "FreeUsageLimitError"}},
+        )
+        prober = ModelProber(10.0, ProberConfig(max_retries=3))
+        result = await prober.probe("model", {})
+        assert result.status == "rate_limited"
+        assert len(httpx_mock.get_requests()) == 1
 
     @pytest.mark.asyncio
     async def test_probe_connection_error(self, httpx_mock):
@@ -382,7 +419,8 @@ class TestCleanupManager:
         auth_file.write_text("{}")
         mgr = CleanupManager(CleanupConfig())
         result = mgr.backup_auth_files([auth_file], dry_run=True)
-        assert result.cleared_count == 1
+        assert result.cleared_count == 0
+        assert result.would_clear_count == 1
         assert not auth_file.with_suffix(".json.bak").exists()
 
     def test_purge_cache(self, tmp_path):

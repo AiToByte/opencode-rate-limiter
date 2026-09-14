@@ -216,6 +216,23 @@ def inspect_auth_files() -> list[dict[str, Any]]:
     return entries
 
 
+def endpoint_bypassed_by_no_proxy(endpoint: str, no_proxy: str | None) -> bool:
+    """Whether NO_PROXY matches the endpoint host (the request goes direct).
+
+    Pure helper around `urllib.request.proxy_bypass_environment` (whose
+    availability/behaviour varies by platform) so it stays unit-testable.
+    """
+    if not no_proxy:
+        return False
+    try:
+        host = urlsplit(endpoint).hostname or ""
+        # dynamic lookup: typeshed gates proxy_bypass_environment by platform
+        bypass_fn = getattr(urllib.request, "proxy_bypass_environment")  # noqa: B009
+        return bool(host) and bool(bypass_fn(host, {"no": no_proxy}))
+    except Exception:
+        return False
+
+
 def _reset_time_strings() -> tuple[int, str]:
     """Seconds to UTC midnight + a human string with UTC and local clock"""
     seconds = seconds_to_utc_midnight()
@@ -399,24 +416,16 @@ async def run_diagnostics(config: Config, model: str | None = None) -> Diagnosis
             )
         )
         no_proxy = diagnosis.proxy_env.get("NO_PROXY")
-        if no_proxy:
-            try:
-                host = urlsplit(config.prober.endpoint).hostname or ""
-                # dynamic lookup: typeshed gates proxy_bypass_environment by platform
-                bypass_fn = getattr(urllib.request, "proxy_bypass_environment")  # noqa: B009
-                bypassed = bool(host) and bool(bypass_fn(host, {"no": no_proxy}))
-            except Exception:
-                bypassed = False
-            if bypassed:
-                diagnosis.findings.append(
-                    Finding(
-                        "warn",
-                        "NO_PROXY 覆盖了探测端点",
-                        f"NO_PROXY={no_proxy} 匹配 {config.prober.endpoint} ——"
-                        "该请求将绕过代理直连，出口 IP 为本机网络而非代理节点。",
-                        remedy="从 NO_PROXY 中移除 opencode.ai / 相关条目。",
-                    )
+        if no_proxy and endpoint_bypassed_by_no_proxy(config.prober.endpoint, no_proxy):
+            diagnosis.findings.append(
+                Finding(
+                    "warn",
+                    "NO_PROXY 覆盖了探测端点",
+                    f"NO_PROXY={no_proxy} 匹配 {config.prober.endpoint} ——"
+                    "该请求将绕过代理直连，出口 IP 为本机网络而非代理节点。",
+                    remedy="从 NO_PROXY 中移除 opencode.ai / 相关条目。",
                 )
+            )
 
     # 2. Egress IP (best effort, never fatal)
     ip = await loop.run_in_executor(None, fetch_public_ip)

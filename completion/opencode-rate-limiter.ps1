@@ -40,11 +40,11 @@ Register-ArgumentCompleter -Native -CommandName @('opencode-rate-limiter') -Scri
     }
     $candidates = switch ($sub) {
         "check" { @("--trend") }
-        "daemon" { @("--interval" "--models") }
+        "daemon" { @("--interval" "--models" "--once" "--stop") }
         "diagnose" { @("--model") }
         "generate-config" { @("--force") }
         "headers" { @("--model" "--export") }
-        "rotate" { @("--strategy" "--apply") }
+        "rotate" { @("--strategy" "--to" "--apply") }
         default { @() }
     }
     if ($sub -eq 'probe') { $candidates += $probeModels }

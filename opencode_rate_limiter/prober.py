@@ -46,15 +46,43 @@ class ModelProber:
 
     `probe_all()` shares one `httpx.AsyncClient` across the concurrent probes
     (connection pooling); a standalone `probe()` uses a one-shot client.
+    `probe_all()` calls must not overlap on one instance (guarded).
     """
 
+    #: Error prefixes worth an immediate retry (transient network faults).
+    #: HTTP statuses — including 429 — are never retried.
+    TRANSIENT_ERROR_PREFIXES = ("connect failed", "connect timeout", "read timeout")
+
     ZEN_ENDPOINT = "https://opencode.ai/zen/v1/chat/completions"
+
+    #: Upper bound for error bodies parsed for `error.type` (oversized
+    #: bodies are treated as unparsable gateway output, not quota signals).
+    MAX_ERROR_BODY_BYTES = 64 * 1024
 
     def __init__(self, timeout: float = 10.0, config: ProberConfig | None = None):
         self.timeout = timeout
         self.config = config or ProberConfig()
         self.log = logging.getLogger("prober")
         self._shared_client: httpx.AsyncClient | None = None
+        self._batch_active = False
+
+    def open(self) -> httpx.AsyncClient:
+        """Ensure the persistent pooled client exists (idempotent).
+
+        Long-lived owners (the daemon) call this once per cycle and
+        `aclose()` at shutdown; one-shot users can skip both and let
+        `probe_all()` manage a batch-scoped client.
+        """
+        if self._shared_client is None:
+            self._shared_client = self._build_client()
+        return self._shared_client
+
+    async def aclose(self) -> None:
+        """Close the persistent client, if any (idempotent)."""
+        client, self._shared_client = self._shared_client, None
+        self._batch_active = False
+        if client is not None:
+            await client.aclose()
 
     def _build_client(self) -> httpx.AsyncClient:
         """Create an httpx.AsyncClient honouring proxy / http2 / pool settings"""
@@ -83,8 +111,6 @@ class ModelProber:
     async def _do_probe(
         self, model: str, headers: dict[str, str], client: httpx.AsyncClient
     ) -> ProbeResult:
-        import time
-
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": self.config.ping_message}],
@@ -92,6 +118,29 @@ class ModelProber:
             "temperature": 0,
         }
         request_headers = {**headers, **self.config.extra_headers}
+
+        attempts = 1 + max(0, self.config.max_retries)
+        result: ProbeResult | None = None
+        for attempt in range(attempts):
+            result = await self._do_probe_once(model, request_headers, payload, client)
+            if not _is_transient_error(result):
+                return result
+            if attempt + 1 < attempts:
+                self.log.debug(
+                    "Transient probe failure, retrying",
+                    extra={"model": model, "attempt": attempt + 1, "error": result.error},
+                )
+        assert result is not None
+        return result
+
+    async def _do_probe_once(
+        self,
+        model: str,
+        request_headers: dict[str, str],
+        payload: dict[str, object],
+        client: httpx.AsyncClient,
+    ) -> ProbeResult:
+        import time
 
         start = time.monotonic()
         timestamp = _dt.datetime.now(_dt.UTC).isoformat().replace("+00:00", "Z")
@@ -132,13 +181,25 @@ class ModelProber:
                     timestamp=timestamp,
                 )
 
-        except httpx.TimeoutException:
+        except httpx.ConnectError as e:
             latency = (time.monotonic() - start) * 1000
             return ProbeResult(
                 model=model,
                 status="error",
                 latency_ms=latency,
-                error="timeout",
+                error=f"connect failed: {e}",
+                timestamp=timestamp,
+            )
+        except httpx.TimeoutException as e:
+            latency = (time.monotonic() - start) * 1000
+            # Connect timeouts point at the proxy/link; read timeouts at a
+            # slow gateway — the distinction drives different remedies.
+            kind = "connect timeout" if isinstance(e, httpx.ConnectTimeout) else "read timeout"
+            return ProbeResult(
+                model=model,
+                status="error",
+                latency_ms=latency,
+                error=kind,
                 timestamp=timestamp,
             )
         except Exception as e:
@@ -169,14 +230,23 @@ class ModelProber:
             return []
 
         overrides = headers_by_model or {}
-        client = self._build_client()
-        self._shared_client = client
+        if self._batch_active:
+            raise RuntimeError("probe_all() calls must not overlap on one ModelProber")
+        # Reuse a persistent client when the owner opened one; otherwise
+        # fall back to a batch-scoped client closed below.
+        owned = self._shared_client is None
+        if owned:
+            self._shared_client = self._build_client()
+        self._batch_active = True
         try:
             tasks = [self.probe(model, overrides.get(model, headers)) for model in models]
             return await asyncio.gather(*tasks)
         finally:
-            self._shared_client = None
-            await client.aclose()
+            self._batch_active = False
+            if owned:
+                client, self._shared_client = self._shared_client, None
+                assert client is not None  # just created above
+                await client.aclose()
 
     @staticmethod
     def _estimate_reset(retry_after: int | None) -> int:
@@ -229,9 +299,22 @@ def _parse_retry_after(raw: str | None) -> int | None:
     return max(0, int(delay))
 
 
+def _is_transient_error(result: ProbeResult) -> bool:
+    """Whether a probe result reflects a transient network fault (retryable)."""
+    return (
+        result.status == "error"
+        and result.http_status is None
+        and isinstance(result.error, str)
+        and result.error.startswith(ModelProber.TRANSIENT_ERROR_PREFIXES)
+    )
+
+
 def _parse_error_type(resp: httpx.Response) -> str | None:
     """Extract error.type from a Zen error body: {"error": {"type": ...}}"""
     try:
+        length = resp.headers.get("Content-Length")
+        if length is not None and int(length) > ModelProber.MAX_ERROR_BODY_BYTES:
+            return None
         body = resp.json()
     except Exception:
         return None

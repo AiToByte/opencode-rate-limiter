@@ -1,6 +1,6 @@
 # opencode-rate-limiter 功能详细介绍文档
 
-版本：0.4.0（2026-09） · 本文回答"每个功能是什么、解决什么问题、边界在哪"。
+版本：0.5.0（2026-09） · 本文回答"每个功能是什么、解决什么问题、边界在哪"。
 命令参数的逐项清单见 [MANUAL.md](../MANUAL.md)；实现原理见
 [implementation.md](implementation.md)。
 
@@ -56,7 +56,10 @@
 | 其他 | `error` | `error_type`（若响应体是 Zen 错误格式，如 `server_error`）或网络错误文本 |
 
 **特点**：
-- 并发执行（共享一个池化连接的 AsyncClient）。
+- 并发执行（共享一个池化连接的 AsyncClient；daemon 中跨周期常驻）。
+- 超时三细分：`connect failed`（链路/代理）/ `connect timeout` / `read timeout`
+  （网关慢），排障方向不同；`[prober].max_retries` 只对这类瞬时错即时重试，
+  HTTP 状态（含 429）永不重试。
 - 配置了账号池时按策略为每个模型注入该账号的 `Authorization: Bearer`，
   并把结果回写健康度——轮换是否生效在输出里直接可见
   （`[account: primary]` 标签 / JSON `account` 字段）。
@@ -118,9 +121,15 @@
 - **趋势网格**（R3）：`check --trend` 以状态字母矩阵展示各模型近 N 轮的可用性
   演变，抖动区间一眼可见。
 - **信号控制**：SIGTERM/SIGINT 优雅停止；SIGHUP 重载配置（CLI 覆盖与账号健康度
-  跨重载保留）；SIGUSR1 立即探测；SIGUSR2 打印状态。Windows 走 stdlib 信号桥接。
-- **单实例锁**：锁文件 + 进程存活检测；第二个实例明确报错退出（退出码 1），
-  死进程遗留锁自动接管。
+  跨重载保留；探测配置不变时**复用暖连接**，变了才重建）；SIGUSR1 立即探测；
+  SIGUSR2 打印状态。Windows 走 stdlib 信号桥接。
+- **单实例锁**：哨兵 `.flock` 上的 OS 文件锁互斥 + `daemon.lock` 记 pid；
+  第二个实例明确报错退出（退出码 1），死进程遗留锁自动接管（v0.4.1 起无竞态）。
+- **长连接复用**（v0.5.0）：连接池 client 跨周期常驻，告别每轮 TCP/TLS 重建。
+- **单轮模式**（v0.5.0）：`daemon --once` 跑一轮就退出（拿锁、防并发 daemon），
+  退出码沿 `probe` 语义（有 rate_limited 即 1）——给 cron/任务计划用。
+- **优雅停止**（v0.5.0）：`daemon --stop` 读锁发 SIGTERM 并等最多 10s；
+  无锁/过期锁/自锁（防自杀）各有明确退出行为。
 
 ## 5. 健康检查（`check`）
 
@@ -148,7 +157,8 @@
   （`{"type":"api","key"}`，含 provider 键控与裸 key 形态）均可解析与注入；
   `check`/`rotate` 以**指纹**（前 6 后 4，如 `sk-abc…wxyz`）展示凭证，明文绝不输出。
 - **限流归因**（R1）：`RateLimitError`（key RPM）计入该账号的 key 维度失败计数
-  （`key_limited_count`）并触发 60s key 冷却——冷却中的账号不再注入凭证，
+  （`key_limited_count`）并触发 key 冷却（`[daemon].key_cooldown_seconds`，默认
+  60s）——冷却中的账号不再注入凭证，
   全部冷却时回退匿名头；`FreeUsageLimitError`（IP 配额）**不**计入凭证健康度，
   因为那是 IP 的责任而非凭证的。
 - `rotate --apply`：把选中账号的凭证**归一化**写入活动 auth.json（`build_auth_payload()`）：
@@ -158,6 +168,8 @@
 - `rotate` 输出包含 `auth_token_resolved` 与 `credential`（kind + 指纹）——
   token 解析支持 opencode 真实 auth 结构（`{type:"oauth", access}`、
   `{type:"api", key}` 与 provider 键控 map）。
+- `rotate --to NAME`（v0.5.0）：故障逃生直切指定账号，跳过策略；JSON/日志带
+  `explicit` 标记；未知名报错并列出可用账号（退出码 1）。
 
 **能力边界（重要）**：免费模型配额键是 IP，**同 IP 换账号不增加额度**；账号池的
 真实收益在付费 key 维度（每 key 独立 1000 RPM）。诊断命令会在遇到
@@ -193,7 +205,7 @@
 - `generate-systemd` / `generate-launchd` / `generate-task`：三端服务文件模板，
   均通过 `OPENCODE_RATE_LIMITER_CONFIG` 指向默认配置（该变量已被 `Config.load`
   实际读取），内置资源上限（systemd `MemoryMax=100M`/`CPUQuota=10%`）。
-- `completions bash|zsh|fish`：补全脚本由真实 parser 派生——新增子命令/选项/模型
+- `completions bash|zsh|fish|powershell`：补全脚本由真实 parser 派生——新增子命令/选项/模型
   无需手改补全；`scripts/generate_completions.py` 一键刷新仓库内 `completion/`。
 
 ## 10. 横切能力

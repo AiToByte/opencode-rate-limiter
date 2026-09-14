@@ -1,6 +1,6 @@
 # opencode-rate-limiter 技术说明与使用手册
 
-版本：0.4.0
+版本：0.5.0
 适用范围：本手册内容全部来自对 `opencode_rate_limiter/` 包实际代码的核对，不描述任何未实现的功能。场景化操作见 `docs/user-guide.md`，架构/实现/功能文档见
 `docs/`；早期拆分文档已移除，其历史差异结论保留在文末「实现事实与文档差异」。
 
@@ -74,7 +74,7 @@ opencode-rate-limiter/
 │   ├── build_binary.py        # PyInstaller 打包脚本
 │   └── generate_completions.py# 一键重新生成 completion/ 下的补全脚本
 ├── completion/                # bash / zsh / fish 补全脚本（已生成）
-├── tests/                     # pytest 测试（255 个）
+├── tests/                     # pytest 测试（277 个）
 ├── man/opencode-rate-limiter.1
 └── .github/workflows/ci.yml   # CI（含二进制构建与发布 job）
 ```
@@ -99,8 +99,9 @@ opencode-rate-limiter/
 | `cleanup` | `CleanupResult`、`CleanupManager` |
 | `logs` | `JSONFormatter`、`HumanFormatter`、`setup_logging`、`level_from_args` |
 | `parser` | `build_parser()`、`should_print_banner()`、结构化命令清单 |
-| `completions` | `_completion_payload`、`_bash/_zsh/_fish_completion`、`generate_completions` |
-| `daemon` | `DaemonStatus`、`RateLimiterDaemon`、单实例锁、状态持久化 |
+| `completions` | `_completion_payload`、`_bash/_zsh/_fish/_powershell_completion`、`generate_completions` |
+| `daemon/` | 包：`_lock`（单实例锁）/`_state`（状态持久化）/`_runner`（`RateLimiterDaemon` 主循环） |
+| `render` | `check`/`probe` 人读渲染（trend/events/diff），`cli` 兼容重导出 |
 | `service` | `generate_systemd_unit` / `generate_launchd_plist` / `generate_task_xml` |
 | `cli` | `cmd_*` 命令处理器、`COMMAND_HANDLERS`、`main()` |
 
@@ -236,7 +237,7 @@ hy3-free, laguna-s-2.1-free, ling-3.0-flash-fin-free, nemotron-3.5-lightning-fre
 
 ```bash
 uv sync --dev          # 安装全部依赖（含开发依赖、lint、类型检查）
-uv run pytest          # 运行测试（255 个）
+uv run pytest          # 运行测试（277 个）
 uv run opencode-rate-limiter --help   # 临时运行
 ```
 
@@ -387,12 +388,13 @@ opencode-rate-limiter headers --model deepseek-v4-flash-free
 ### 4.6 `rotate` —— 手动轮换账号池
 
 ```
-opencode-rate-limiter rotate [--strategy round_robin|least_used|health]
+opencode-rate-limiter rotate [--strategy round_robin|least_used|health] [--to NAME]
 ```
 
 | 选项 | 默认 | 说明 |
 |------|------|------|
 | `--strategy` | 配置值 | 选择策略；仅显式传入时**覆盖**配置文件中的 `strategy` |
+| `--to NAME` | 无 | 直接选中指定账号（大小写敏感），跳过策略选择；未知名报错退出码 `1` |
 | `--apply` | 关 | 把选中账号解析出的 auth JSON 写入活动的 OpenCode `auth.json`（先备份为 `auth.json.bak`） |
 
 - 行为：仅显式传入 `--strategy` 时覆盖配置，否则使用配置文件值；构造 `AccountPool`，调用
@@ -404,9 +406,10 @@ opencode-rate-limiter rotate [--strategy round_robin|least_used|health]
   `{zen键: {type:"api", key}}`；单条 oauth / bare 载荷包裹为 provider 键控结构；
   完整 provider 键控快照原样透传。
   账号无可解析凭证时报错，退出码 `1`；与 `--dry-run` 组合只打印目标路径不写盘。
-- `--json` 输出：`{"rotated_to": name, "strategy": ..., "accounts": [...],
+- `--json` 输出：`{"rotated_to": name, "strategy": ..., "explicit": bool, "accounts": [...],
   "auth_token_resolved": bool, "credential": {"kind","fingerprint"}|null,
   "dry_run": bool, "applied": "applied"|"dry_run"|null, "auth_target": path|null}`。
+  `explicit` 为 `--to` 是否生效。
 - 人类可读输出显示凭证形态与指纹，如 `Credential: api (sk-abc…wxyz)`；无法解析时
   显示 `Auth token resolved: no`。
 - `--dry-run`：输出带 `(dry run) Preview only` 标注（`rotate` 本身无副作用，预览与
@@ -504,6 +507,8 @@ opencode-rate-limiter diagnose [--model MODEL] [--json]
 
 ```
 opencode-rate-limiter daemon [--interval SECONDS] [--models CSV] [--json] [--dry-run]
+opencode-rate-limiter daemon --once [--models CSV] [--json]   # 单轮巡检
+opencode-rate-limiter daemon --stop [--json]                 # 优雅停止
 ```
 
 | 选项 | 说明 |
@@ -511,6 +516,8 @@ opencode-rate-limiter daemon [--interval SECONDS] [--models CSV] [--json] [--dry
 | `--interval SECONDS` | 覆盖探测间隔；`< 5` 报错并退出码 `2`；省略则用配置文件值 |
 | `--models CSV` | 逗号分隔模型列表，覆盖配置文件；解析后为空时报错退出码 `2` |
 | `--dry-run` | 仅打印一行日志即退出（`DRY RUN: Would start daemon`），退出码 `0` |
+| `--once` | 只跑一轮探测就退出（cron/任务计划友好）；有模型被限流退出码 `1`，否则 `0`；与 `--stop` 互斥 |
+| `--stop` | 向锁文件记录的 pid 发 SIGTERM 并等待最多 10s；无锁/过期锁/停止成功退出码 `0`，超时 `1`；与 `--once` 互斥 |
 
 后台运行细节见 §6。前台 Ctrl+C 优雅退出；守护进程在 Windows 下以
 `add_signal_handler` 不可用时的 `signal.signal` 兜底桥接处理 SIGINT/SIGTERM。
@@ -625,6 +632,7 @@ extra_headers = {}             # 附加请求头，如 { X-Trace = "abc" }
 # proxy = "http://127.0.0.1:7890"   # 可选代理（httpx >= 0.28）
 http2 = false                    # HTTP/2 探测（需可选依赖 h2）
 connection_pool_size = 8         # 共享连接池大小
+max_retries = 0                  # 瞬时网络错即时重试次数（>= 0；429 永不重试）
 
 [headers]
 user_agent = "opencode/{version}"   # 模板仅支持 {version} 占位符
@@ -675,6 +683,7 @@ preserve_config = true         # 必须为 true（校验强制）
 | `proxy` | str | 无 | httpx `proxy=` 格式（缺省走环境变量代理） |
 | `http2` | bool | false | 需可选依赖 `h2`，缺失时回退 HTTP/1.1 |
 | `connection_pool_size` | int | 8 | ≥ 1 |
+| `max_retries` | int | 0 | ≥ 0；仅连接失败/超时即时重试，HTTP 状态（含 429）永不重试 |
 
 #### 策略算法
 
@@ -693,7 +702,7 @@ score = success_rate * w_success
 （w_* 由 [account_pool].score_weights 配置，默认 0.5 / 0.3 / 0.2）
 
 success_rate  = 滑动窗口内成功率（窗口为空时回退 success_count / max(total_count, 1)）
-latency_score = max(0.0, 1.0 - (avg_latency_ms - 100) / 900)   # 100ms→1.0，1000ms→0.0
+latency_score = min(1.0, max(0.0, 1.0 - (avg_latency_ms - 100) / 900))  # 钳制[0,1]
 recency_score = min(1.0, hours_since_last_error / 24)          # 无错误记录按 24h 计
 ```
 
@@ -836,15 +845,19 @@ pid / updated_at
 
 ### 6.4 单实例锁
 
-`daemon` 启动时先在状态目录创建 `daemon.lock`（内容为 pid，`O_CREAT|O_EXCL` 原子创建）：
+`daemon` 启动时在状态目录创建 `daemon.lock`（内容为 pid）并在同目录哨兵文件
+`daemon.flock` 上持有 OS 文件锁（POSIX `flock` / Windows `msvcrt.locking`，
+进程持有至退出，OS 在进程死亡时自动释放）：
 
 | 情形 | 行为 |
 |------|------|
-| 锁不存在 | 创建，正常启动 |
-| 锁存在且 pid 存活 | 报错 `another daemon instance appears to be running (pid ...)`，退出码 `1` |
-| 锁存在但 pid 已死 / 内容损坏 | 打 warning 并接管（删除旧锁重建） |
+| 哨兵锁可获取 | 写入 pid，正常启动（过期 pid 直接覆盖并打 warning） |
+| 哨兵锁被占且 pid 存活 | 报错 `another daemon instance appears to be running (pid ...)`，退出码 `1` |
+| 哨兵锁被占但 pid 已死 / 内容损坏 | 拒绝启动并报错（活锁持有者存在，不可损坏其状态） |
 
-- 进程退出（含信号优雅停止）时自动删除锁，且仅当锁内 pid 仍是自己时才删。
+- 进程退出（含信号优雅停止）时解锁、关闭并删除锁文件（仅当锁内 pid 仍是自己时删）。
+- 哨兵与 pid 分离的原因：Windows 字节锁会拒绝同文件的其他打开，pid 文件须保持可读。
+- 停止运行中的实例用 `daemon --stop`（SIGTERM + 最多 10s 等待），不要直接删锁文件。
 - Windows 下存活检测用 `OpenProcess`/`GetExitCodeProcess`（`os.kill(pid, 0)` 在
   Windows 会**终止**进程，绝不使用）；POSIX 用 `os.kill(pid, 0)`。
 - 锁路径与状态文件同目录：`user_state_dir("opencode-rate-limiter")/daemon.lock`。
@@ -1002,7 +1015,7 @@ opencode-rate-limiter -vv daemon
 ### 11.1 测试
 
 ```bash
-uv run pytest -q        # 255 passed
+uv run pytest -q        # 277 passed
 ```
 
 覆盖：核心清理（dry-run/备份/缓存）、探测（httpx mock 200/429/超时）、账号池读取

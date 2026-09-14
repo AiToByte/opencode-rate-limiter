@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import contextlib
 import datetime as _dt
 import json
 import logging
+import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -52,13 +56,19 @@ def print_banner() -> None:
     print("=" * 60)
 
 
-def _print_cleanup_result(result: CleanupResult) -> None:
+def _print_cleanup_result(result: CleanupResult, dry_run: bool = False) -> None:
     for d in result.details:
         print(f"  {d}")
     if result.errors:
         for e in result.errors:
             print(f"  ERROR: {e}")
-    print(f"\nDone: {result.cleared_count} items processed, {len(result.errors)} errors")
+    if dry_run:
+        print(
+            f"\nDone: {result.cleared_count} items processed, "
+            f"{result.would_clear_count} would be processed, {len(result.errors)} errors"
+        )
+    else:
+        print(f"\nDone: {result.cleared_count} items processed, {len(result.errors)} errors")
 
 
 def _print_quota_notice() -> None:
@@ -82,7 +92,7 @@ async def cmd_quick(config: Config, args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
     else:
-        _print_cleanup_result(result)
+        _print_cleanup_result(result, dry_run=args.dry_run)
         _print_quota_notice()
 
     return 0 if not result.errors else 1
@@ -99,7 +109,7 @@ async def cmd_deep(config: Config, args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
     else:
-        _print_cleanup_result(result)
+        _print_cleanup_result(result, dry_run=args.dry_run)
         _print_quota_notice()
 
     return 0 if not result.errors else 1
@@ -242,7 +252,25 @@ async def cmd_rotate(config: Config, args: argparse.Namespace) -> int:
             print("No accounts configured. Add accounts to [account_pool] in config.toml")
         return 1
 
-    next_account = pool.get_next()
+    forced = getattr(args, "to", None)
+    if forced:
+        next_account = next((a for a in pool.accounts if a.name == forced), None)
+        if next_account is None:
+            log.error("Unknown account '%s'", forced)
+            available = ", ".join(a.name for a in pool.accounts)
+            if args.json:
+                print(
+                    json.dumps(
+                        {"error": f"unknown account: {forced}", "accounts": available},
+                        indent=2,
+                    )
+                )
+            else:
+                print(f"Unknown account: {forced} (available: {available})")
+            return 1
+        pool.note_served(next_account)
+    else:
+        next_account = pool.get_next()
     if next_account is None:
         log.warning("Account pool returned no account despite non-empty pool")
         return 1
@@ -266,6 +294,7 @@ async def cmd_rotate(config: Config, args: argparse.Namespace) -> int:
         extra={
             "account": next_account.name,
             "strategy": strategy,
+            "explicit": bool(forced),
             "dry_run": args.dry_run,
             "auth_token": token is not None,
         },
@@ -277,6 +306,7 @@ async def cmd_rotate(config: Config, args: argparse.Namespace) -> int:
                 {
                     "rotated_to": next_account.name,
                     "strategy": strategy,
+                    "explicit": bool(forced),
                     "accounts": [a.name for a in pool.accounts],
                     "auth_token_resolved": token is not None,
                     "credential": (
@@ -297,7 +327,7 @@ async def cmd_rotate(config: Config, args: argparse.Namespace) -> int:
         )
     else:
         print(f"Rotated to account: {next_account.name}")
-        print(f"Strategy: {strategy}")
+        print(f"Strategy: {strategy}" + (" (explicit --to, strategy skipped)" if forced else ""))
         print(f"Available accounts: {', '.join(a.name for a in pool.accounts)}")
         if credential:
             print(f"Credential: {credential[0]} ({credential_fingerprint(credential[1])})")
@@ -508,6 +538,26 @@ async def cmd_daemon(config: Config, args: argparse.Namespace) -> int:
         interval_override=interval_override,
         models_override=models_override,
     )
+    if getattr(args, "stop", False):
+        return await cmd_daemon_stop(args)
+    if getattr(args, "once", False):
+        try:
+            results = await daemon.run_once()
+        except DaemonLockError as e:
+            log.error("Not probing: %s", e)
+            return 1
+        except KeyboardInterrupt:
+            log.info("Interrupted by user")
+            return 130
+        limited = [r.model for r in results if r.status == "rate_limited"]
+        if not args.json:
+            for r in results:
+                print(f"  [{r.status}] {r.model} ({r.latency_ms:.0f}ms)")
+            if limited:
+                print("  限流模型: " + ", ".join(sorted(limited)))
+        else:
+            print(json.dumps([r.to_dict() for r in results], indent=2, ensure_ascii=False))
+        return 1 if limited else 0
     try:
         await daemon.run()
     except DaemonLockError as e:
@@ -516,6 +566,60 @@ async def cmd_daemon(config: Config, args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         log.info("Interrupted by user")
     return 0
+
+
+async def cmd_daemon_stop(args: argparse.Namespace) -> int:
+    """Stop a running daemon gracefully (SIGTERM + wait, cross-platform)."""
+    import signal as _signal
+
+    from .daemon import _pid_alive, get_daemon_lock_path
+
+    log = logging.getLogger("cmd.daemon-stop")
+    lock_path = get_daemon_lock_path()
+    pid: int | None = None
+    try:
+        text = lock_path.read_text(encoding="utf-8").strip()
+        pid = int(text)
+    except (OSError, ValueError):
+        pid = None
+    if pid is None:
+        msg = {"running": False, "reason": "no lock file"}
+        if args.json:
+            print(json.dumps(msg, indent=2))
+        else:
+            print("Daemon does not appear to be running (no lock file).")
+        return 0
+    if not _pid_alive(pid):
+        with contextlib.suppress(OSError):
+            lock_path.unlink()
+        msg = {"running": False, "pid": pid, "reason": "stale lock removed"}
+        if args.json:
+            print(json.dumps(msg, indent=2))
+        else:
+            print(f"Removed stale lock (pid {pid} not alive).")
+        return 0
+    if pid == os.getpid():
+        log.error("Lock file belongs to this process; refusing to stop ourselves")
+        if not args.json:
+            print("Lock file belongs to this process; refusing to stop ourselves.")
+        return 1
+    log.info("Stopping daemon", extra={"pid": pid})
+    try:
+        os.kill(pid, _signal.SIGTERM)
+    except (OSError, ValueError) as e:
+        log.error("Failed to signal daemon (pid %s): %s", pid, e)
+        return 1
+    deadline = time.monotonic() + 10.0
+    while _pid_alive(pid) and time.monotonic() < deadline:
+        await asyncio.sleep(0.2)
+    stopped = not _pid_alive(pid)
+    if args.json:
+        print(json.dumps({"running": not stopped, "pid": pid}, indent=2))
+    elif stopped:
+        print(f"Daemon (pid {pid}) stopped.")
+    else:
+        print(f"Daemon (pid {pid}) still alive after 10s; stop it manually.")
+    return 0 if stopped else 1
 
 
 async def cmd_generate_systemd(config: Config, args: argparse.Namespace) -> int:

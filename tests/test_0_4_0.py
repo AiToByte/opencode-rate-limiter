@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -10,6 +12,56 @@ import opencode_rate_limiter
 from opencode_rate_limiter import Config
 from opencode_rate_limiter.parser import build_parser
 from opencode_rate_limiter.prober import _parse_retry_after
+
+
+def _pool_config(accounts: list[dict[str, Any]], strategy: str = "round_robin") -> Any:
+    from opencode_rate_limiter import AccountPoolConfig
+
+    return AccountPoolConfig(accounts=accounts, strategy=strategy)  # type: ignore[arg-type]
+
+
+def test_last_served_tracks_picks() -> None:
+    from opencode_rate_limiter import AccountPool
+
+    pool = AccountPool(
+        _pool_config([{"name": "a", "auth_path": "/a"}, {"name": "b", "auth_path": "/b"}])
+    )
+    assert pool.last_served is None
+    cur = pool.get_current()
+    assert cur is not None and cur.name == "a"  # fallback
+    first = pool.get_next()
+    assert first is not None and pool.last_served is not None
+    assert pool.last_served.name == first.name == "a"
+    cur = pool.get_current()
+    assert cur is not None and cur.name == "a"
+    # peek-style picks do not pollute attribution
+    pool.get_next(record=False)
+    assert pool.last_served is not None and pool.last_served.name == "a"
+    pool.note_served(pool.accounts[1])
+    assert pool.last_served is not None and pool.last_served.name == "b"
+
+
+def test_flock_second_holder_refused(tmp_path: Path) -> None:
+    from opencode_rate_limiter import Config, RateLimiterDaemon
+    from opencode_rate_limiter.daemon import DaemonLockError
+
+    lock = tmp_path / "daemon.lock"
+    first = RateLimiterDaemon(Config(), state_path=tmp_path / "s1.json", lock_path=lock)
+    first._acquire_lock()
+    try:
+        second = RateLimiterDaemon(Config(), state_path=tmp_path / "s2.json", lock_path=lock)
+        with pytest.raises(DaemonLockError):
+            second._acquire_lock()
+    finally:
+        first._release_lock()
+    assert not lock.exists()
+
+
+def test_kind_validation_rejects_unknown() -> None:
+    from opencode_rate_limiter import AccountPoolConfig
+
+    with pytest.raises(ValueError, match="kind"):
+        AccountPoolConfig(accounts=[{"name": "a", "auth_path": "/a", "kind": "saml"}]).validate()
 
 
 def test_public_all_matches_exports() -> None:

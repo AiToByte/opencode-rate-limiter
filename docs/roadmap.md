@@ -1,6 +1,6 @@
 # opencode-rate-limiter 迭代路线图（Roadmap）
 
-版本：2026-09 · 基线：v0.4.0（R1–R4 已落地，正确性/质量大修合版）（13 模块包 + render、diagnose 已落地、255 测试全绿）
+版本：2026-09 · 基线：v0.4.1（正确性收尾：文件锁/归因/合并/超时细分）
 配套：[architecture.md](architecture.md) · [features.md](features.md) ·
 [implementation.md](implementation.md) · [user-guide.md](user-guide.md) ·
 [MANUAL.md](../MANUAL.md)
@@ -219,3 +219,26 @@ R1 (key 轮换) ──► R2 (发布 0.3.0) ──► R3 (趋势/事件) ──�
 - R3/R4 可并行；R5 按网关线上行为触发，不占常规排期。
 - 每轮结束的固定动作：CHANGELOG 归并、四份文档 + MANUAL 同步、全量
   pytest/ruff/mypy、补全脚本重新生成、git 提交（本轮既定流程）。
+
+---
+
+## 9. 已落地轮次（0.4.x / 0.5.0，严格 semver）
+
+### v0.4.1 — A 轨正确性收尾（patch）
+
+- 单实例锁改 OS 文件锁（哨兵 `.flock` + pid 文件信息展示），消 TOCTOU 双跑
+- 轮换归因改 `last_served`，429 处理不再双消费 round-robin 游标
+- `kind` 取值校验、递归深合并、大小写不敏感字段匹配
+- dry-run 计数诚实化（`would_clear_count`）、超时三细分、错误体 64KB 上限
+- `probe_all` 重入守卫、NO_PROXY 纯函数化、版本缓存测试隔离
+- man 页勘误（state.json/退出码表）、release 测试门补 lint/type
+
+### v0.5.0 — B 轨架构 + D 轨逃生三角（minor）
+
+- 探测连接跨周期复用（daemon 持有长连接，SIGHUP 按配置变更决定转移/关闭）
+- `daemon.py` 拆为 `daemon/` 包（`_lock` / `_state` / `_runner`），公共导入不变
+- auth 读取 mtime+size 感知缓存（`invalidate_auth_cache()` 供测试/轮换）
+- `[prober].max_retries`（仅瞬时网络错，永不重试 429）
+- `daemon --once`（单轮巡检，cron 友好，退出码沿 probe 语义）
+- `rotate --to NAME`（故障逃生直切，`explicit` 进 JSON/日志）
+- `daemon --stop`（SIGTERM + 10s 等待，跨平台；自锁拒绝防自杀）

@@ -830,8 +830,9 @@ class TestVersionOverride:
         monkeypatch.setenv("OPENCODE_VERSION", "")
         # 空值视为未设置：走真实检测（which 找不到 opencode 时返回 unknown）
         monkeypatch.setattr("shutil.which", lambda _: None)
-        from opencode_rate_limiter import get_opencode_version
+        from opencode_rate_limiter import clear_opencode_version_cache, get_opencode_version
 
+        clear_opencode_version_cache()
         assert get_opencode_version() == "unknown"
 
 

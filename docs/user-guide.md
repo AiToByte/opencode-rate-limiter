@@ -1,6 +1,6 @@
 # opencode-rate-limiter 使用手册
 
-版本：0.4.0（2026-09） · 场景驱动的操作手册。
+版本：0.5.0（2026-09） · 场景驱动的操作手册。
 命令参数的完整清单与配置字段表见 [MANUAL.md](../MANUAL.md)；功能背景见
 [features.md](features.md)；遇到问题想深挖原理见
 [implementation.md](implementation.md) 与 [architecture.md](architecture.md)。
@@ -119,11 +119,12 @@ opencode-rate-limiter diagnose
    # ]
    ```
 
-2. 验证与切换：
+ 2. 验证与切换：
 
    ```bash
    opencode-rate-limiter rotate --dry-run          # 预览将选中谁、token 能否解析
    opencode-rate-limiter rotate --strategy round_robin
+   opencode-rate-limiter rotate --to key-2         # 逃生直切：跳过策略选定账号
    opencode-rate-limiter rotate --apply            # 真正写入 auth.json（自动备份）
    ```
 
@@ -157,7 +158,14 @@ opencode-rate-limiter generate-task > task.xml    # 见 MANUAL §6.5 的 schtask
 kill -USR1 <pid>   # 立即触发一轮探测
 kill -HUP  <pid>   # 重载配置（不丢探测预算计数与账号健康度）
 kill      <pid>    # 优雅停止
+opencode-rate-limiter daemon --stop    # 跨平台优雅停止（读锁发 SIGTERM 并等 10s）
 opencode-rate-limiter check    # 查看运行状态/预算/冷却/健康度
+```
+
+不想常驻时，用单轮模式代替（cron/任务计划友好，拿锁防并发）：
+
+```bash
+opencode-rate-limiter daemon --once --json    # 跑一轮就退出；有模型被限流则退出码 1
 ```
 
 **预算建议**：daemon 与真实用量共享每日 IP 配额。默认 `interval_seconds=900` +
@@ -195,10 +203,12 @@ interval_seconds = 900         # 探测间隔（探测与真实用量共享配�
 daily_probe_budget = 200       # 每日探测总数硬上限（0 = 不限）
 respect_cooldown = true        # 429 的模型在冷却期内跳过探测
 history_size = 20              # check 中趋势统计的轮数
+key_cooldown_seconds = 60      # key 维度限流后该账号冷却秒数（0 = 不冷却）
 
 [prober]
 proxy = "http://127.0.0.1:7897"  # 不设则遵循 HTTP(S)_PROXY 环境变量
 # http2 = true                    # 需 pip install ".[http2]"
+# max_retries = 1                 # 仅瞬时网络错重试；429 永不重试
 
 [account_pool]
 strategy = "health"
