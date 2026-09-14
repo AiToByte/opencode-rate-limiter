@@ -1,6 +1,6 @@
 # opencode-rate-limiter 功能详细介绍文档
 
-版本：0.6.1（2026-09） · 本文回答"每个功能是什么、解决什么问题、边界在哪"。
+版本：0.6.2（2026-09） · 本文回答"每个功能是什么、解决什么问题、边界在哪"。
 命令参数的逐项清单见 [MANUAL.md](../MANUAL.md)；实现原理见
 [implementation.md](implementation.md)。
 
@@ -62,6 +62,9 @@
 - 超时三细分：`connect failed`（链路/代理）/ `connect timeout` / `read timeout`
   （网关慢），排障方向不同；`[prober].max_retries` 只对这类瞬时错即时重试，
   HTTP 状态（含 429）永不重试。
+- **单次 token 成本**：200 响应的 `usage` 记入结果，人读如 `(3203ms, 248+1 tok)`——
+  网关对 ping 也计约 248 prompt token，探测并非零成本。但**总量未知**：网关不
+  暴露配额计数器，"剩余额度"算不出来，只能判定是否撞线。
 - 配置了账号池时按策略为每个模型注入该账号的 `Authorization: Bearer`，
   并把结果回写健康度——轮换是否生效在输出里直接可见
   （`[account: primary]` 标签 / JSON `account` 字段）。

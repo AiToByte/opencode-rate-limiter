@@ -255,3 +255,8 @@ R1 (key 轮换) ──► R2 (发布 0.3.0) ──► R3 (趋势/事件) ──�
 - 网关强制 `x-opencode-session`（与官方 CLI 行为核对），缺失全 400
 - 每 prober 实例随机 session（生命周期稳定），`[prober].session_id` 可覆盖
 - 真机验证 200 `available`；此前 3 次 400 均为载荷形状问题，配额一直干净
+
+### v0.6.2 — 单次 token 成本（patch）
+
+- 200 响应 `usage` 记入探测结果（JSON + 人读 `248+1 tok`），随 daemon 状态持久化
+- 实测 ping 计约 248 prompt token；剩余额度仍不可知（网关无计数器）

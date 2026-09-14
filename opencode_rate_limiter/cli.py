@@ -42,6 +42,9 @@ from .render import (
 from .render import (
     render_trend as _render_trend_impl,
 )
+from .render import (
+    usage_suffix,
+)
 from .service import (
     _default_config_path_str,
     generate_launchd_plist,
@@ -167,7 +170,7 @@ async def cmd_probe(config: Config, args: argparse.Namespace) -> int:
             icon = status_icons.get(r.status, "?")
             account_name = account_by_model.get(r.model)
             tag = f" [account: {account_name}]" if account_name else ""
-            print(f"  [{icon}] {r.model}: {r.status} ({r.latency_ms:.0f}ms){tag}")
+            print(f"  [{icon}] {r.model}: {r.status} ({r.latency_ms:.0f}ms{usage_suffix(r)}){tag}")
             if r.retry_after:
                 print(f"      retry_after: {r.retry_after}s")
             if r.error:
@@ -591,7 +594,7 @@ async def cmd_daemon(config: Config, args: argparse.Namespace) -> int:
         limited = [r.model for r in results if r.status == "rate_limited"]
         if not args.json:
             for r in results:
-                print(f"  [{r.status}] {r.model} ({r.latency_ms:.0f}ms)")
+                print(f"  [{r.status}] {r.model} ({r.latency_ms:.0f}ms{usage_suffix(r)})")
             if limited:
                 print("  限流模型: " + ", ".join(sorted(limited)))
         else:

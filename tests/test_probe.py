@@ -263,6 +263,49 @@ class TestProberSessionConfig:
         loaded = Config.load(target)
         assert loaded.prober.session_id == "ses_fixed"
 
+
+class TestProbeUsage:
+    @pytest.mark.asyncio
+    async def test_usage_parsed_from_200(self, httpx_mock):
+        httpx_mock.add_response(
+            url=ModelProber.ZEN_ENDPOINT,
+            status_code=200,
+            json={"usage": {"prompt_tokens": 12, "completion_tokens": 1, "total_tokens": 13}},
+        )
+        result = await ModelProber(10.0).probe("model", {})
+        assert result.status == "available"
+        assert result.usage == {"prompt_tokens": 12, "completion_tokens": 1, "total_tokens": 13}
+        assert result.to_dict()["usage"] == result.usage
+
+    @pytest.mark.asyncio
+    async def test_usage_absent_is_none(self, httpx_mock):
+        httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
+        result = await ModelProber(10.0).probe("model", {})
+        assert result.usage is None
+
+    @pytest.mark.asyncio
+    async def test_usage_malformed_is_none(self, httpx_mock):
+        httpx_mock.add_response(
+            url=ModelProber.ZEN_ENDPOINT,
+            status_code=200,
+            json={"usage": {"prompt_tokens": "lots", "weird": [1]}},
+        )
+        result = await ModelProber(10.0).probe("model", {})
+        assert result.usage is None
+
+    def test_usage_suffix(self):
+        from opencode_rate_limiter.render import usage_suffix
+
+        full = ProbeResult(
+            model="m",
+            status="available",
+            usage={"prompt_tokens": 12, "completion_tokens": 1},
+        )
+        assert usage_suffix(full) == ", 12+1 tok"
+        total_only = ProbeResult(model="m", status="available", usage={"total_tokens": 9})
+        assert usage_suffix(total_only) == ", 9 tok"
+        assert usage_suffix(ProbeResult(model="m", status="error")) == ""
+
     @pytest.mark.asyncio
     async def test_probe_connection_error(self, httpx_mock):
         import httpx as _httpx

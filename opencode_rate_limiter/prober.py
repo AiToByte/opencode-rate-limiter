@@ -26,6 +26,10 @@ class ProbeResult:
     latency_ms: float = 0.0
     error: str | None = None
     error_type: str | None = None
+    # Per-request token cost reported by the gateway (OpenAI-compatible
+    # `usage` object). Informational only: the gateway exposes no quota
+    # counters, so this cannot be turned into a "remaining" figure.
+    usage: dict[str, int] | None = None
     timestamp: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -38,6 +42,7 @@ class ProbeResult:
             "latency_ms": round(self.latency_ms, 1),
             "error": self.error,
             "error_type": self.error_type,
+            "usage": self.usage,
             "timestamp": self.timestamp,
         }
 
@@ -56,9 +61,9 @@ class ModelProber:
 
     ZEN_ENDPOINT = "https://opencode.ai/zen/v1/chat/completions"
 
-    #: Upper bound for error bodies parsed for `error.type` (oversized
-    #: bodies are treated as unparsable gateway output, not quota signals).
-    MAX_ERROR_BODY_BYTES = 64 * 1024
+    #: Upper bound for response bodies parsed for `error.type` / `usage`
+    #: (oversized bodies are treated as unparsable gateway output).
+    MAX_PARSED_BODY_BYTES = 64 * 1024
 
     def __init__(self, timeout: float = 10.0, config: ProberConfig | None = None):
         self.timeout = timeout
@@ -164,6 +169,7 @@ class ModelProber:
                     status="available",
                     http_status=200,
                     latency_ms=latency,
+                    usage=_parse_usage(resp),
                     timestamp=timestamp,
                 )
             elif resp.status_code == 429:
@@ -318,11 +324,39 @@ def _is_transient_error(result: ProbeResult) -> bool:
     )
 
 
+def _parse_usage(resp: httpx.Response) -> dict[str, int] | None:
+    """Extract per-request token cost from a 200 body (`usage` object).
+
+    Returns None when absent or malformed — usage is informational, never
+    load-bearing, so parsing is deliberately forgiving.
+    """
+    try:
+        length = resp.headers.get("Content-Length")
+        if length is not None and int(length) > ModelProber.MAX_PARSED_BODY_BYTES:
+            return None
+        body = resp.json()
+    except Exception:
+        return None
+    if not isinstance(body, dict):
+        return None
+    usage = body.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    parsed: dict[str, int] = {}
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = usage.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            parsed[key] = int(value)
+    return parsed or None
+
+
 def _parse_error_type(resp: httpx.Response) -> str | None:
     """Extract error.type from a Zen error body: {"error": {"type": ...}}"""
     try:
         length = resp.headers.get("Content-Length")
-        if length is not None and int(length) > ModelProber.MAX_ERROR_BODY_BYTES:
+        if length is not None and int(length) > ModelProber.MAX_PARSED_BODY_BYTES:
             return None
         body = resp.json()
     except Exception:

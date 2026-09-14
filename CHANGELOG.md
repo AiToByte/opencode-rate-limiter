@@ -7,6 +7,15 @@ All notable changes to opencode-rate-limiter will be documented in this file.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-14
+
+### Added
+
+- **单次 token 成本记录**：200 响应的 `usage`（prompt/completion/total）记入
+  `ProbeResult`（JSON `usage` 字段，随 daemon 状态持久化），人读输出如
+  `(3203ms, 248+1 tok)`。实测网关对 ping 计约 248 prompt token——探测并非零成本。
+  网关不暴露配额计数器，"剩余额度"仍算不出，只能判定是否撞线。
+
 ## [0.6.1] - 2026-09-14
 
 ### Fixed

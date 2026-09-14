@@ -15,6 +15,17 @@ from .prober import ProbeResult
 _TREND_LETTERS = {"available": "a", "rate_limited": "!", "error": "x", "unknown": "?"}
 
 
+def usage_suffix(result: ProbeResult) -> str:
+    """Human-readable per-request token cost, e.g. `, 12+1 tok` (or empty)."""
+    usage = result.usage or {}
+    prompt = usage.get("prompt_tokens")
+    completion = usage.get("completion_tokens")
+    if prompt is None and completion is None:
+        total = usage.get("total_tokens")
+        return f", {total} tok" if total is not None else ""
+    return f", {(prompt or 0)}+{(completion or 0)} tok"
+
+
 def account_credential_info(pool: AccountPool, account: Account) -> dict[str, str] | None:
     """Resolve a single account's credential for display (kind + fingerprint)."""
     try:

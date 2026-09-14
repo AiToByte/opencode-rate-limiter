@@ -1,6 +1,6 @@
 # opencode-rate-limiter 技术说明与使用手册
 
-版本：0.6.1
+版本：0.6.2
 适用范围：本手册内容全部来自对 `opencode_rate_limiter/` 包实际代码的核对，不描述任何未实现的功能。场景化操作见 `docs/user-guide.md`，架构/实现/功能文档见
 `docs/`；早期拆分文档已移除，其历史差异结论保留在文末「实现事实与文档差异」。
 
@@ -332,13 +332,14 @@ opencode-rate-limiter probe [MODEL] [--json]
   头（token 无法解析的账号回退为无鉴权头），探测结果回写账号健康度（见 §2.3）。
 - 人类可读输出（每模型两行）：
   ```
-    [+] deepseek-v4-flash-free: available (45ms) [account: primary]
+    [+] deepseek-v4-flash-free: available (45ms, 248+1 tok) [account: primary]
     [!] nemotron-3-ultra-free: rate_limited (120ms) [account: backup1]
         retry_after: 60s
     [x] big-pickle: error (2000ms)
         error: timeout
   ```
   配置账号池时，JSON 输出每项额外含 `"account"` 字段（服务该模型的账号，未配置时为 null）。
+  可用探测的 JSON 每项含 `"usage"`（当次 token 成本，无则为 null）。
   图标映射：`available→+`、`rate_limited→!`、`error→x`、`unknown→?`。
 - `--json` 输出：`ProbeResult.to_dict()` 数组：
   `model / status / http_status / retry_after / estimated_reset / latency_ms / error / timestamp`。
