@@ -1115,3 +1115,93 @@ class TestProbeDiff:
         await cmd_probe(config, argparse.Namespace(model="all", json=False))
         out = capsys.readouterr().out
         assert "daemon 上一轮" not in out
+
+
+class TestNotifications:
+    """R6: 事件通知（webhook / 命令钩子），fail-open"""
+
+    def _daemon(self, tmp_path, accounts=None, **kwargs):
+        daemon = make_daemon(
+            tmp_path,
+            models=["m1"],
+            auto_cleanup=False,
+            accounts=[{"name": "a", "auth_json": "{}"}] if accounts is None else accounts,
+            **kwargs,
+        )
+        return daemon
+
+    async def _cycle_with(self, daemon):
+        async def probe(model: str, headers: dict[str, str]) -> ProbeResult:
+            return ProbeResult(
+                model=model, status="rate_limited", http_status=429,
+                retry_after=60, estimated_reset=60,
+                error_type="RateLimitError", timestamp="t",
+            )
+
+        daemon.prober.probe = probe  # type: ignore[method-assign]
+        await daemon._probe_cycle()
+
+    @pytest.mark.asyncio
+    async def test_webhook_receives_event(self, tmp_path, httpx_mock):
+        daemon = self._daemon(tmp_path)
+        daemon.config.daemon.notify_webhook = "https://hooks.example.com/x"
+        httpx_mock.add_response(url="https://hooks.example.com/x", status_code=200)
+
+        await self._cycle_with(daemon)
+        await wait_until(
+            lambda: len(httpx_mock.get_requests()) >= 2, timeout=3
+        )  # 同周期有 cooldown_armed + key_cooldown 两个事件
+        kinds = set()
+        for req in httpx_mock.get_requests():
+            body = json.loads(req.read())
+            assert body["source"] == "opencode-rate-limiter"
+            kinds.add(body["event"]["kind"])
+        assert kinds == {"cooldown_armed", "key_cooldown"}
+
+    @pytest.mark.asyncio
+    async def test_webhook_failure_is_fail_open(self, tmp_path):
+        """webhook 不可达时探测周期不受影响"""
+        daemon = self._daemon(tmp_path)
+        daemon.config.daemon.notify_webhook = "http://127.0.0.1:9/unreachable"
+
+        await self._cycle_with(daemon)
+        await wait_until(
+            lambda: any(e["kind"] == "key_cooldown" for e in daemon.status.events),
+            timeout=3,
+        )
+        assert daemon.status.total_cycles == 1  # 主循环完好
+        assert daemon.status.model_results["m1"].status == "rate_limited"
+
+    @pytest.mark.asyncio
+    async def test_command_hook_receives_stdin_json(self, tmp_path):
+        import sys
+
+        out_file = tmp_path / "hook_out.json"
+        daemon = self._daemon(tmp_path, accounts=[])
+        daemon.config.daemon.notify_command = (
+            f'"{sys.executable}" -c "import sys; '
+            f"open(r'{out_file}', 'w', encoding='utf-8').write(sys.stdin.read())\""
+        )
+        await self._cycle_with(daemon)
+        await wait_until(lambda: out_file.exists(), timeout=5)
+        payload = json.loads(out_file.read_text(encoding="utf-8"))
+        assert payload["event"]["kind"] == "cooldown_armed"
+
+    @pytest.mark.asyncio
+    async def test_command_failure_is_fail_open(self, tmp_path):
+        daemon = self._daemon(tmp_path)
+        daemon.config.daemon.notify_command = f'"{__import__("sys").executable}" -c "import sys; sys.exit(3)"'
+
+        await self._cycle_with(daemon)
+        assert daemon.status.total_cycles == 1
+
+    @pytest.mark.asyncio
+    async def test_no_notify_config_means_no_dispatch(self, tmp_path):
+        daemon = self._daemon(tmp_path)
+        await self._cycle_with(daemon)
+        assert daemon.status.total_cycles == 1
+
+    def test_notify_webhook_validation(self):
+        with pytest.raises(ValueError, match="notify_webhook"):
+            DaemonConfig(notify_webhook="ftp://x").validate()
+        DaemonConfig(notify_webhook="https://ok.example.com/hook").validate()

@@ -10,7 +10,9 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
+import threading
 import time
 from collections import deque
 from collections.abc import Callable
@@ -198,8 +200,53 @@ class RateLimiterDaemon:
             self.status.events = deque(self.status.events, maxlen=event_size)
 
     def _record_event(self, kind: str, **fields: Any) -> None:
-        """Append a decision event to the audit ring (persisted via daemon.json)"""
-        self.status.events.append({"ts": _now_iso(), "kind": kind, **fields})
+        """Append a decision event to the audit ring and dispatch notifications"""
+        event = {"ts": _now_iso(), "kind": kind, **fields}
+        self.status.events.append(event)
+        if self.config.daemon.notify_webhook or self.config.daemon.notify_command:
+            # Fire-and-forget: notifications must never block or fail the loop
+            threading.Thread(target=self._notify_sync, args=(event,), daemon=True).start()
+
+    def _notify_sync(self, event: dict[str, Any]) -> None:
+        """Dispatch one event to the configured webhook / command hook.
+
+        Every failure is downgraded to a warning: a broken notification
+        channel must never affect the probe loop.
+        """
+        webhook = self.config.daemon.notify_webhook
+        if webhook:
+            try:
+                import httpx
+
+                resp = httpx.post(
+                    webhook,
+                    json={"source": "opencode-rate-limiter", "event": event},
+                    timeout=5.0,
+                )
+                if resp.status_code >= 300:
+                    self.log.warning(
+                        "Notify webhook returned %s", resp.status_code
+                    )
+            except Exception as e:
+                self.log.warning("Notify webhook failed: %s", e)
+
+        command = self.config.daemon.notify_command
+        if command:
+            try:
+                proc = subprocess.run(
+                    command,
+                    shell=True,
+                    input=json.dumps(event, ensure_ascii=False),
+                    capture_output=True,
+                    text=True,
+                    timeout=10.0,
+                )
+                if proc.returncode != 0:
+                    self.log.warning(
+                        "Notify command exited %s: %s", proc.returncode, proc.stderr.strip()
+                    )
+            except Exception as e:
+                self.log.warning("Notify command failed: %s", e)
 
     def _load_runtime_state(self) -> None:
         """Restore runtime state across restarts: probe budget + cooldowns"""

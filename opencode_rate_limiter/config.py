@@ -44,6 +44,8 @@ class DaemonConfig:
     history_size: int = 20
     event_history_size: int = 50
     respect_cooldown: bool = True
+    notify_webhook: str | None = None
+    notify_command: str | None = None
     # Hard cap on probe requests per UTC day (0 = unlimited). The server
     # counts every probe against the IP's free daily quota.
     daily_probe_budget: int = 200
@@ -61,6 +63,10 @@ class DaemonConfig:
             raise ValueError(f"event_history_size must be >= 1, got {self.event_history_size}")
         if self.daily_probe_budget < 0:
             raise ValueError(f"daily_probe_budget must be >= 0, got {self.daily_probe_budget}")
+        if self.notify_webhook and not self.notify_webhook.startswith(("http://", "https://")):
+            raise ValueError(
+                f"notify_webhook must be an http(s) URL, got {self.notify_webhook}"
+            )
 
 
 @dataclass
@@ -381,6 +387,16 @@ class Config:
                 "auto_cleanup_on_429": self.daemon.auto_cleanup_on_429,
                 "history_size": self.daemon.history_size,
                 "event_history_size": self.daemon.event_history_size,
+                **(
+                    {"notify_webhook": self.daemon.notify_webhook}
+                    if self.daemon.notify_webhook
+                    else {}
+                ),
+                **(
+                    {"notify_command": self.daemon.notify_command}
+                    if self.daemon.notify_command
+                    else {}
+                ),
                 "respect_cooldown": self.daemon.respect_cooldown,
                 "daily_probe_budget": self.daemon.daily_probe_budget,
             },
