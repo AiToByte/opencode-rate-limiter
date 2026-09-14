@@ -43,6 +43,15 @@ class TestHeaderInjector:
         h = injector.build_headers("deepseek-v4-flash-free")
         assert h["x-model"] == "deepseek-v4-flash-free"
 
+    def test_build_headers_with_session(self):
+        injector = HeaderInjector(HeadersConfig(), "1.18.16")
+        h = injector.build_headers(session="ses_abc123")
+        assert h["x-opencode-session"] == "ses_abc123"
+
+    def test_build_headers_without_session_omits_header(self):
+        injector = HeaderInjector(HeadersConfig(), "1.18.16")
+        assert "x-opencode-session" not in injector.build_headers()
+
     def test_build_headers_custom_template(self):
         cfg = HeadersConfig(user_agent="custom/{version}", x_opencode_version="v{version}")
         injector = HeaderInjector(cfg, "2.0.0")
@@ -189,6 +198,70 @@ class TestModelProber:
         result = await prober.probe("model", {})
         assert result.status == "rate_limited"
         assert len(httpx_mock.get_requests()) == 1
+
+    @pytest.mark.asyncio
+    async def test_probe_sends_session_header(self, httpx_mock):
+        httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
+        prober = ModelProber(10.0)
+        result = await prober.probe("model", {})
+        assert result.status == "available"
+        (request,) = httpx_mock.get_requests()
+        assert request.headers["x-opencode-session"] == prober.session_id
+        assert prober.session_id.startswith("ses_probe_")
+
+    @pytest.mark.asyncio
+    async def test_probe_session_stable_per_instance_but_unique(self, httpx_mock):
+        for _ in range(2):
+            httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
+        prober = ModelProber(10.0)
+        await prober.probe("a", {})
+        await prober.probe("b", {})
+        requests = httpx_mock.get_requests()
+        first = requests[0].headers["x-opencode-session"]
+        second = requests[1].headers["x-opencode-session"]
+        assert first == second
+        assert ModelProber(10.0).session_id != prober.session_id
+
+    @pytest.mark.asyncio
+    async def test_probe_session_id_config_override(self, httpx_mock):
+        from opencode_rate_limiter import ProberConfig
+
+        httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
+        prober = ModelProber(10.0, ProberConfig(session_id="ses_fixed"))
+        assert prober.session_id == "ses_fixed"
+        await prober.probe("model", {})
+        (request,) = httpx_mock.get_requests()
+        assert request.headers["x-opencode-session"] == "ses_fixed"
+
+    @pytest.mark.asyncio
+    async def test_probe_missing_session_error_type(self, httpx_mock):
+        httpx_mock.add_response(
+            url=ModelProber.ZEN_ENDPOINT,
+            status_code=400,
+            json={"error": {"type": "MissingSessionID"}},
+        )
+        prober = ModelProber(10.0)
+        result = await prober.probe("model", {})
+        assert result.status == "error"
+        assert result.http_status == 400
+        assert result.error_type == "MissingSessionID"
+
+
+class TestProberSessionConfig:
+    def test_session_id_blank_rejected(self):
+        from opencode_rate_limiter import ProberConfig
+
+        with pytest.raises(ValueError, match="session_id"):
+            ProberConfig(session_id="  ").validate()
+
+    def test_session_id_round_trip(self, tmp_path):
+        from opencode_rate_limiter import ProberConfig
+
+        cfg = Config(prober=ProberConfig(session_id="ses_fixed"))
+        target = tmp_path / "config.toml"
+        cfg.save(target)
+        loaded = Config.load(target)
+        assert loaded.prober.session_id == "ses_fixed"
 
     @pytest.mark.asyncio
     async def test_probe_connection_error(self, httpx_mock):

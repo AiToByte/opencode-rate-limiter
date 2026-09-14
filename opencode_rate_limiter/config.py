@@ -135,6 +135,10 @@ class ProberConfig:
     # errors / timeouts). HTTP statuses — including 429 — are never
     # retried: 429 burns quota and is handled by daemon cooldowns instead.
     max_retries: int = 0
+    # Explicit x-opencode-session header value. When unset, each ModelProber
+    # generates its own random session id (the gateway rejects session-less
+    # requests with MissingSessionID).
+    session_id: str | None = None
 
     def validate(self) -> None:
         if not self.endpoint.startswith(("http://", "https://")):
@@ -147,6 +151,8 @@ class ProberConfig:
             )
         if self.max_retries < 0:
             raise ValueError(f"prober.max_retries must be >= 0, got {self.max_retries}")
+        if self.session_id is not None and not self.session_id.strip():
+            raise ValueError("prober.session_id must be non-empty when set")
 
 
 @dataclass
@@ -464,6 +470,8 @@ class Config:
                 "http2": self.prober.http2,
                 "connection_pool_size": self.prober.connection_pool_size,
                 "max_retries": self.prober.max_retries,
+                # tomli_w cannot serialize None; omit session_id when unset
+                **({"session_id": self.prober.session_id} if self.prober.session_id else {}),
                 # tomli_w cannot serialize None; omit proxy when unset
                 **({"proxy": self.prober.proxy} if self.prober.proxy else {}),
             },

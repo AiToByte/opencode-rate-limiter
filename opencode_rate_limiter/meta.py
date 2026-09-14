@@ -7,4 +7,4 @@ from __future__ import annotations
 # scripts/check_version.py). Deliberately a static string — not
 # importlib.metadata — so the version is available without an install and
 # check_version.py can regex it.
-__version__ = "0.6.0"
+__version__ = "0.6.1"

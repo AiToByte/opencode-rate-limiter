@@ -7,6 +7,18 @@ All notable changes to opencode-rate-limiter will be documented in this file.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-14
+
+### Fixed
+
+- **探测缺 session 头导致全 400**：网关要求 `x-opencode-session`
+  （缺失报 `MissingSessionID`，与官方 CLI 行为核对一致）。
+  `ModelProber` 现为每个实例生成随机 session id（`ses_probe_<hex>`，
+  daemon 生命周期内稳定），随每次探测发送；`[prober].session_id` 可显式覆盖。
+  真机验证：`probe big-pickle` → 200 `available`。
+- `HeaderInjector.build_headers()` 新增可选 `session` 参数
+  （`to_env_export` 同步支持，缺省输出不变）。
+
 ## [0.6.0] - 2026-09-14
 
 ### Added

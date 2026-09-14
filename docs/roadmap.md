@@ -249,3 +249,9 @@ R1 (key 轮换) ──► R2 (发布 0.3.0) ──► R3 (趋势/事件) ──�
 - JSON 日志精简 + 异常堆栈常驻，`--json-verbose` 才带代码位置
 - `--log-file` 落盘（1MB×4 轮转，与 stderr 同格式）
 - `check --export-events FILE [--export-format jsonl|csv]` 事件落盘
+
+### v0.6.1 — 探测 session 头（patch）
+
+- 网关强制 `x-opencode-session`（与官方 CLI 行为核对），缺失全 400
+- 每 prober 实例随机 session（生命周期稳定），`[prober].session_id` 可覆盖
+- 真机验证 200 `available`；此前 3 次 400 均为载荷形状问题，配额一直干净

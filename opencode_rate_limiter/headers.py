@@ -29,7 +29,12 @@ class HeaderInjector:
         self.config = config
         self.version = version
 
-    def build_headers(self, model: str | None = None, token: str | None = None) -> dict[str, str]:
+    def build_headers(
+        self,
+        model: str | None = None,
+        token: str | None = None,
+        session: str | None = None,
+    ) -> dict[str, str]:
         format_args = {"version": self.version, "model": model or ""}
         headers = {
             "User-Agent": _safe_format(self.config.user_agent, format_args),
@@ -42,11 +47,15 @@ class HeaderInjector:
             headers["x-model"] = model
         if token:
             headers["Authorization"] = f"Bearer {token}"
+        if session:
+            # Required by the Zen gateway (MissingSessionID otherwise);
+            # mirrors the official CLI's x-opencode-session header.
+            headers["x-opencode-session"] = session
         return headers
 
-    def to_env_export(self, model: str | None = None) -> str:
+    def to_env_export(self, model: str | None = None, session: str | None = None) -> str:
         """Generate shell export statements for eval (values safely escaped)."""
-        h = self.build_headers(model)
+        h = self.build_headers(model, session=session)
         lines = []
         for k, v in h.items():
             env_key = k.upper().replace("-", "_")

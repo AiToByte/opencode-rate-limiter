@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as _dt
 import importlib.util
 import logging
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -65,6 +66,10 @@ class ModelProber:
         self.log = logging.getLogger("prober")
         self._shared_client: httpx.AsyncClient | None = None
         self._batch_active = False
+        # The Zen gateway requires x-opencode-session (MissingSessionID
+        # otherwise). One id per prober instance: stable within a daemon's
+        # life, unique across runs unless explicitly configured.
+        self.session_id = self.config.session_id or f"ses_probe_{uuid.uuid4().hex}"
 
     def open(self) -> httpx.AsyncClient:
         """Ensure the persistent pooled client exists (idempotent).
@@ -117,7 +122,11 @@ class ModelProber:
             "max_tokens": self.config.max_tokens,
             "temperature": 0,
         }
-        request_headers = {**headers, **self.config.extra_headers}
+        request_headers = {
+            **headers,
+            "x-opencode-session": self.session_id,
+            **self.config.extra_headers,
+        }
 
         attempts = 1 + max(0, self.config.max_retries)
         result: ProbeResult | None = None

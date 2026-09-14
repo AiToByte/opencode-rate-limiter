@@ -1,6 +1,6 @@
 # opencode-rate-limiter 功能详细介绍文档
 
-版本：0.6.0（2026-09） · 本文回答"每个功能是什么、解决什么问题、边界在哪"。
+版本：0.6.1（2026-09） · 本文回答"每个功能是什么、解决什么问题、边界在哪"。
 命令参数的逐项清单见 [MANUAL.md](../MANUAL.md)；实现原理见
 [implementation.md](implementation.md)。
 
@@ -57,6 +57,8 @@
 
 **特点**：
 - 并发执行（共享一个池化连接的 AsyncClient；daemon 中跨周期常驻）。
+- 每次探测携带 `x-opencode-session`（网关强制要求，缺失报 `MissingSessionID`；
+  每个 prober 实例随机生成、生命周期内稳定，`[prober].session_id` 可显式覆盖）。
 - 超时三细分：`connect failed`（链路/代理）/ `connect timeout` / `read timeout`
   （网关慢），排障方向不同；`[prober].max_retries` 只对这类瞬时错即时重试，
   HTTP 状态（含 429）永不重试。

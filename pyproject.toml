@@ -7,7 +7,7 @@ packages = ["opencode_rate_limiter"]
 
 [project]
 name = "opencode-rate-limiter"
-version = "0.6.0"
+version = "0.6.1"
 description = "OpenCode 免费模型限流缓解与账号池管理工具"
 readme = "README.md"
 requires-python = ">=3.11"

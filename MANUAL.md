@@ -1,6 +1,6 @@
 # opencode-rate-limiter 技术说明与使用手册
 
-版本：0.6.0
+版本：0.6.1
 适用范围：本手册内容全部来自对 `opencode_rate_limiter/` 包实际代码的核对，不描述任何未实现的功能。场景化操作见 `docs/user-guide.md`，架构/实现/功能文档见
 `docs/`；早期拆分文档已移除，其历史差异结论保留在文末「实现事实与文档差异」。
 
@@ -74,7 +74,7 @@ opencode-rate-limiter/
 │   ├── build_binary.py        # PyInstaller 打包脚本
 │   └── generate_completions.py# 一键重新生成 completion/ 下的补全脚本
 ├── completion/                # bash / zsh / fish 补全脚本（已生成）
-├── tests/                     # pytest 测试（286 个）
+├── tests/                     # pytest 测试（294 个）
 ├── man/opencode-rate-limiter.1
 └── .github/workflows/ci.yml   # CI（含二进制构建与发布 job）
 ```
@@ -237,7 +237,7 @@ hy3-free, laguna-s-2.1-free, ling-3.0-flash-fin-free, nemotron-3.5-lightning-fre
 
 ```bash
 uv sync --dev          # 安装全部依赖（含开发依赖、lint、类型检查）
-uv run pytest          # 运行测试（286 个）
+uv run pytest          # 运行测试（294 个）
 uv run opencode-rate-limiter --help   # 临时运行
 ```
 
@@ -635,7 +635,8 @@ extra_headers = {}             # 附加请求头，如 { X-Trace = "abc" }
 # proxy = "http://127.0.0.1:7890"   # 可选代理（httpx >= 0.28）
 http2 = false                    # HTTP/2 探测（需可选依赖 h2）
 connection_pool_size = 8         # 共享连接池大小
-max_retries = 0                  # 瞬时网络错即时重试次数（>= 0；429 永不重试）
+max_retries = 0                  # 瞬时网络错即时重试次数（>= 1）；429 永不重试
+# session_id = "ses_..."          # 显式 x-opencode-session；缺省每实例随机生成
 
 [headers]
 user_agent = "opencode/{version}"   # 模板仅支持 {version} 占位符
@@ -687,6 +688,7 @@ preserve_config = true         # 必须为 true（校验强制）
 | `http2` | bool | false | 需可选依赖 `h2`，缺失时回退 HTTP/1.1 |
 | `connection_pool_size` | int | 8 | ≥ 1 |
 | `max_retries` | int | 0 | ≥ 0；仅连接失败/超时即时重试，HTTP 状态（含 429）永不重试 |
+| `session_id` | str | 无（随机） | 非空；显式 x-opencode-session（网关强制要求） |
 
 #### 策略算法
 
@@ -1027,7 +1029,7 @@ opencode-rate-limiter -vv daemon
 ### 11.1 测试
 
 ```bash
-uv run pytest -q        # 286 passed
+uv run pytest -q        # 294 passed
 ```
 
 覆盖：核心清理（dry-run/备份/缓存）、探测（httpx mock 200/429/超时）、账号池读取

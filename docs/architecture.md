@@ -1,6 +1,6 @@
 # opencode-rate-limiter 技术架构文档
 
-版本：0.6.0（2026-09） · 适用代码：`opencode_rate_limiter/` 包（当前 main）
+版本：0.6.1（2026-09） · 适用代码：`opencode_rate_limiter/` 包（当前 main）
 
 > 本文回答"系统为什么长这样"。实现层面的"怎么做的"见 [implementation.md](implementation.md)，
 > 功能层面的"能做什么"见 [features.md](features.md)，操作层面的"怎么用"见
