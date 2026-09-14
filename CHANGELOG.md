@@ -7,6 +7,71 @@ All notable changes to opencode-rate-limiter will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-14
+
+### Added
+
+- **R3/R4（0.3.0 后未发布部分，随 0.4.0 发布）**：
+  - 冷却期跨重启持久化、嵌套表深合并、头模板 `{model}` 占位符、
+    NO_PROXY 精确判定、任务计划 XML 改 UTF-8 声明；
+  - daemon 决策事件审计环、`check --trend` 趋势网格、`probe` 与上一轮 diff。
+- **通知投递串行化**：daemon 事件通知改走单 daemon 工作线程 + 队列——
+  不阻塞探测循环、不无界建线程、不在退出时挂起；事件风暴不丢投递。
+- **`[daemon].key_cooldown_seconds`**（默认 60，0 = 不冷却）：key 维度限流的
+  账号冷却可配置；`Config.save()` / `generate-config` 模板同步。
+- **PowerShell 补全**：`completions powershell`（`Register-ArgumentCompleter`），
+  `completion/opencode-rate-limiter.ps1` 随包生成；fish 全局 flag 改由 parser
+  派生，消除硬编码漂移。
+- **诊断走账号池**：`diagnose` 在配置账号池时与 `probe`/daemon 一致注入凭证
+  并标注所用账号，避免 key 维度限额被误诊为 IP 维度；auth 大文件（>1MB）跳过。
+- **版本探测缓存**：`get_opencode_version()` 缓存 subprocess 结果 5 分钟
+ （`OPENCODE_VERSION` 覆盖永远直通），`clear_opencode_version_cache()` 供测试。
+- **完整 CI**：`.github/workflows/ci.yml` 从空壳补为 lint-type +
+  3 平台 × 3 版本 pytest 矩阵 + E2E 冒烟；`check_version.py` 扩展到
+  MANUAL/docs 头/README/CHANGELOG 条目全断言。
+- **回归测试**：`tests/test_0_4_0.py`（9 项）锁住 `__all__` 一致性、
+  Retry-After 宽容解析、`_merge` 无副作用、rotate 默认策略、头部占位符校验、
+  延迟分钳制、自定义缓存目录、PowerShell 生成。
+
+### Fixed
+
+- **`__all__` 腐烂**：移除 `#`/`/` 等噪音符号与未导出模块名，补上漏导出的
+  `cmd_diagnose`，下掉 `_completion_payload`/`_pid_alive` 私有导出
+  （测试改由 `daemon`/`completions` 模块直引）。
+- **429 误判**：`Retry-After` 解析宽容化（整数/浮点/HTTP-date），不可解析时
+  回退估算而不再把真 429 吞成普通 error。
+- **健康分超界**：`latency_score` 钳制到 [0,1]（新账号 avg=0 不再得 1.11 加分）。
+- **配置合并污染基对象**：`Config._merge` 改深拷贝；环境变量解析改 JSON 优先，
+  含 `,` 的 URL/路径不再被误切为 list。
+- **`rotate --strategy` 默认覆盖配置**：默认改为 `None`，未显式传参时保留
+  配置文件值（破坏性注意：此前默认 `health` 总会覆盖）。
+- **自定义缓存目录被忽略**：`CleanupManager` 新增 `resolve_cache_dirs()`，
+  `full_cleanup`/`purge_cache` 默认合并配置目录与原生目录。
+- **凭证写盘非原子**：`rotate --apply` 与 auth 备份改原子写（tmp + replace，
+  `copy2` 保留元数据），既有 `.json.bak` 先轮转为时间戳副本。
+- **冷却时间基准混用**：daemon 统一 aware UTC，持久化 ISO 含时区，
+  读取兼容 `Z` 后缀与旧 naive 格式。
+- **`auth_path` 环境变量展开**：与配置路径展开规则一致（`~` + `$VAR`/`%VAR%`）。
+- **平台路径分支错位**：macOS 不再重复收集 Linux XDG 路径。
+- **export 注入风险**：`to_env_export` 转义双引号、`$`、反引号与反斜杠；
+  头模板未知占位符回退原文（`HeadersConfig.validate` 前置校验）。
+- **遗留误导文档**：根目录 `限流措施解除.md` 移入 `docs/archive/` 并标
+  DEPRECATED（其"删本地锁解除限流"结论已被源码证伪）。
+- **测试侧滞后**：`test_cooldown_persisted` 改 tz-aware 断言；命令钩子断言改
+  原始事件形态；webhook 测试补第二个 mock 响应；移除与已安装版本不兼容的
+  本地 `httpx_mock` fixture 覆盖。
+
+### Changed
+
+- **渲染层拆分**：`cli.py` 的趋势/事件/diff 渲染移入 `render.py`，
+  `cli` 保留同名兼容包装；`check` 改单池复用（消除每账号建池的 O(N²)），
+  `probe` 的 daemon-diff 改 `to_thread` 不阻塞事件循环。
+- **预算截断防饥饿**：每日预算裁剪改轮转切片，被截掉的尾部模型下一轮优先。
+- **等待抖动**：daemon 周期间隔附加 ±5%（上限 ±30s）抖动，同配多实例不齐射网关。
+- **文档同步**：MANUAL/四份 docs 头/README/man 页统一 0.4.0；`release.md`
+  版本号参数化；`implementation.md` 冷却/`_merge`/任务计划三条已知限制更新；
+  man 页修正 interval 默认 900 与 completions 四 shell。
+
 ### Added
 
 - **R4 — 可靠性收尾**：

@@ -66,8 +66,8 @@ complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from rotate" -l 
 
 complete -c opencode-rate-limiter -f \
     -l config \
-    -l json \
-    -l verbose \
-    -l quiet \
     -l dry-run \
-    -l version
+    -l json \
+    -l quiet \
+    -l verbose \
+    -l version \

@@ -2,7 +2,22 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from .config import HeadersConfig
+
+
+def _safe_format(template: str, args: dict[str, Any]) -> str:
+    """Format a header template, falling back to the raw template on misuse."""
+    try:
+        return template.format(**args)
+    except (KeyError, IndexError, ValueError):
+        return template
+
+
+def _shell_escape(value: str) -> str:
+    """Escape a value for inclusion in a double-quoted shell string."""
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
 
 
 class HeaderInjector:
@@ -17,9 +32,9 @@ class HeaderInjector:
     def build_headers(self, model: str | None = None, token: str | None = None) -> dict[str, str]:
         format_args = {"version": self.version, "model": model or ""}
         headers = {
-            "User-Agent": self.config.user_agent.format(**format_args),
-            "x-opencode-client": self.config.x_opencode_client.format(**format_args),
-            "x-opencode-version": self.config.x_opencode_version.format(**format_args),
+            "User-Agent": _safe_format(self.config.user_agent, format_args),
+            "x-opencode-client": _safe_format(self.config.x_opencode_client, format_args),
+            "x-opencode-version": _safe_format(self.config.x_opencode_version, format_args),
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
         }
@@ -30,12 +45,12 @@ class HeaderInjector:
         return headers
 
     def to_env_export(self, model: str | None = None) -> str:
-        """Generate shell export statements for eval"""
+        """Generate shell export statements for eval (values safely escaped)."""
         h = self.build_headers(model)
         lines = []
         for k, v in h.items():
             env_key = k.upper().replace("-", "_")
-            lines.append(f'export {env_key}="{v}"')
+            lines.append(f'export {env_key}="{_shell_escape(v)}"')
         return "\n".join(lines)
 
     def to_curl_args(self, model: str | None = None) -> str:

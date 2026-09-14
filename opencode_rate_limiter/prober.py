@@ -110,7 +110,7 @@ class ModelProber:
                 )
             elif resp.status_code == 429:
                 retry_after = resp.headers.get("Retry-After")
-                retry_after_int = int(retry_after) if retry_after else None
+                retry_after_int = _parse_retry_after(retry_after)
                 return ProbeResult(
                     model=model,
                     status="rate_limited",
@@ -196,6 +196,37 @@ def seconds_to_utc_midnight() -> int:
     now = _dt.datetime.now(_dt.UTC)
     midnight = (now + _dt.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     return max(1, int((midnight - now).total_seconds()))
+
+
+def _parse_retry_after(raw: str | None) -> int | None:
+    """Leniently parse a Retry-After header (delta-seconds, float, HTTP-date).
+
+    Returns None when the header is missing or unparsable, so a weird header
+    never downgrades a real 429 into a generic error.
+    """
+    if not raw:
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    # Plain (or float) delta-seconds, the form the Zen gateway uses.
+    try:
+        return max(0, int(float(text)))
+    except ValueError:
+        pass
+    # HTTP-date form (RFC 9110 §13.1.1): delay until that moment.
+    from email.utils import parsedate_to_datetime
+
+    try:
+        moment = parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    if moment is None:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=_dt.UTC)
+    delay = (moment - _dt.datetime.now(_dt.UTC)).total_seconds()
+    return max(0, int(delay))
 
 
 def _parse_error_type(resp: httpx.Response) -> str | None:

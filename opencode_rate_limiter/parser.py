@@ -90,7 +90,10 @@ Examples:
 
     rotate_p = add_sub("rotate", "手动轮换账号池")
     rotate_p.add_argument(
-        "--strategy", choices=["round_robin", "least_used", "health"], default="health"
+        "--strategy",
+        choices=["round_robin", "least_used", "health"],
+        default=None,
+        help="选择策略；省略时使用配置文件中的 strategy",
     )
     rotate_p.add_argument(
         "--apply",
@@ -115,7 +118,9 @@ Examples:
     gen_config_p = add_sub("generate-config", "生成默认配置文件（已存在时需 --force 覆盖）")
     gen_config_p.add_argument("--force", action="store_true", help="覆盖已存在的配置文件")
 
-    completions_p = add_sub("completions", "生成 shell 补全脚本 (bash/zsh/fish)")
-    completions_p.add_argument("shell", choices=["bash", "zsh", "fish"], help="目标 shell")
+    completions_p = add_sub("completions", "生成 shell 补全脚本 (bash/zsh/fish/powershell)")
+    completions_p.add_argument(
+        "shell", choices=["bash", "zsh", "fish", "powershell"], help="目标 shell"
+    )
 
     return parser

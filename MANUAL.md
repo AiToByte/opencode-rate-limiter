@@ -1,6 +1,6 @@
 # opencode-rate-limiter 技术说明与使用手册
 
-版本：0.3.0
+版本：0.4.0
 适用范围：本手册内容全部来自对 `opencode_rate_limiter/` 包实际代码的核对，不描述任何未实现的功能。场景化操作见 `docs/user-guide.md`，架构/实现/功能文档见
 `docs/`；早期拆分文档已移除，其历史差异结论保留在文末「实现事实与文档差异」。
 
@@ -74,7 +74,7 @@ opencode-rate-limiter/
 │   ├── build_binary.py        # PyInstaller 打包脚本
 │   └── generate_completions.py# 一键重新生成 completion/ 下的补全脚本
 ├── completion/                # bash / zsh / fish 补全脚本（已生成）
-├── tests/                     # pytest 测试（188 个）
+├── tests/                     # pytest 测试（255 个）
 ├── man/opencode-rate-limiter.1
 └── .github/workflows/ci.yml   # CI（含二进制构建与发布 job）
 ```
@@ -236,7 +236,7 @@ hy3-free, laguna-s-2.1-free, ling-3.0-flash-fin-free, nemotron-3.5-lightning-fre
 
 ```bash
 uv sync --dev          # 安装全部依赖（含开发依赖、lint、类型检查）
-uv run pytest          # 运行测试（188 个）
+uv run pytest          # 运行测试（255 个）
 uv run opencode-rate-limiter --help   # 临时运行
 ```
 
@@ -392,10 +392,10 @@ opencode-rate-limiter rotate [--strategy round_robin|least_used|health]
 
 | 选项 | 默认 | 说明 |
 |------|------|------|
-| `--strategy` | `health` | 选择策略；传入后**覆盖**配置文件中的 `strategy` |
+| `--strategy` | 配置值 | 选择策略；仅显式传入时**覆盖**配置文件中的 `strategy` |
 | `--apply` | 关 | 把选中账号解析出的 auth JSON 写入活动的 OpenCode `auth.json`（先备份为 `auth.json.bak`） |
 
-- 行为：临时将 `config.account_pool.strategy` 设为 CLI 值，构造 `AccountPool`，调用
+- 行为：仅显式传入 `--strategy` 时覆盖配置，否则使用配置文件值；构造 `AccountPool`，调用
   `get_next()` 选出「下一个」账号，并用 `resolve_credential()` 解析其凭证
   （kind + token）。
 - **`--apply`**：把选中账号的凭证**归一化**写入目标 `auth.json`
@@ -566,7 +566,7 @@ opencode-rate-limiter generate-config [--force] [--config PATH] [--json]
 ### 4.14 `completions` —— 生成 shell 补全
 
 ```
-opencode-rate-limiter completions bash|zsh|fish
+opencode-rate-limiter completions bash|zsh|fish|powershell
 ```
 
 - 补全脚本由真实 CLI parser（`_completion_payload()`）派生：子命令列表、各子命令专属选项、
@@ -645,6 +645,7 @@ preserve_config = true         # 必须为 true（校验强制）
 |------|------|------|------|
 | `interval_seconds` | int | 900 | ≥ 5（探测与真实用量共享每日 IP 配额，默认刻意保守） |
 | `daily_probe_budget` | int | 200 | ≥ 0；每 UTC 日探测请求总数硬上限，0 = 不限 |
+| `key_cooldown_seconds` | int | 60 | ≥ 0；账号触发 key 维度限流后的冷却秒数，0 = 不冷却 |
 | `models` | list[str] | `FREE_MODELS`（8 个） | 非空 |
 | `probe_timeout_seconds` | float | 10.0 | > 0 |
 | `auto_cleanup_on_429` | bool | true | - |
@@ -1001,7 +1002,7 @@ opencode-rate-limiter -vv daemon
 ### 11.1 测试
 
 ```bash
-uv run pytest -q        # 188 passed
+uv run pytest -q        # 255 passed
 ```
 
 覆盖：核心清理（dry-run/备份/缓存）、探测（httpx mock 200/429/超时）、账号池读取
@@ -1025,8 +1026,10 @@ uv run mypy .
 
 ### 11.3 版本一致性
 
-发布前核对三处版本号一致：`opencode_rate_limiter.__version__`、
-`pyproject.toml`、`man/opencode-rate-limiter.1`。发布流程（tag → CI 产物）待 Phase 7 重建；
+发布前以 `uv run python scripts/check_version.py <版本>` 核对全部版本标记一致：
+`opencode_rate_limiter.__version__`、`pyproject.toml`、`man/opencode-rate-limiter.1`、
+`MANUAL.md` 头、四份 `docs/*.md` 头、`README.md` 状态行，且 `CHANGELOG.md` 含对应
+`## [<版本>]` 条目。发布流程（tag → CI 产物）见 `docs/release.md`；
 变更记录见 `CHANGELOG.md`。
 
 ---

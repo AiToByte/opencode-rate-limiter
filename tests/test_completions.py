@@ -81,11 +81,19 @@ def test_fish_completion_contains_subcommand_options() -> None:
 
 def test_generate_completions_invalid_shell_raises() -> None:
     with pytest.raises(ValueError, match="Unsupported shell"):
-        generate_completions("powershell")
+        generate_completions("nushell")
+
+
+def test_powershell_completion_contains_commands_and_models() -> None:
+    script = generate_completions("powershell")
+    for cmd in ALL_COMMANDS:
+        assert cmd in script
+    assert "Register-ArgumentCompleter" in script
+    assert FREE_MODELS[0] in script
 
 
 def test_generate_completions_all_outputs_differ() -> None:
-    from opencode_rate_limiter import _completion_payload
+    from opencode_rate_limiter.completions import _completion_payload
 
     payload = _completion_payload()
     assert payload["prog"] == "opencode-rate-limiter"

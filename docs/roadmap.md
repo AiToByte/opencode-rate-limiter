@@ -1,6 +1,6 @@
 # opencode-rate-limiter 迭代路线图（Roadmap）
 
-版本：2026-09 · 基线：v0.2.0+（R1/R2 已于 0.3.0 落地）（13 模块包、diagnose 已落地、202 测试全绿）
+版本：2026-09 · 基线：v0.4.0（R1–R4 已落地，正确性/质量大修合版）（13 模块包 + render、diagnose 已落地、255 测试全绿）
 配套：[architecture.md](architecture.md) · [features.md](features.md) ·
 [implementation.md](implementation.md) · [user-guide.md](user-guide.md) ·
 [MANUAL.md](../MANUAL.md)

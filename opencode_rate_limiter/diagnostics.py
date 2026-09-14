@@ -204,9 +204,12 @@ def inspect_auth_files() -> list[dict[str, Any]]:
         }
         if path.exists():
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                entry["shape"], entry["has_token"] = _auth_shape(data)
-                entry["credentials"] = _credential_summaries(data)
+                if path.stat().st_size > 1_000_000:
+                    entry["shape"] = "unreadable (too large)"
+                else:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    entry["shape"], entry["has_token"] = _auth_shape(data)
+                    entry["credentials"] = _credential_summaries(data)
             except Exception as e:
                 entry["shape"] = f"unreadable ({type(e).__name__})"
         entries.append(entry)
@@ -483,16 +486,40 @@ async def run_diagnostics(config: Config, model: str | None = None) -> Diagnosis
             )
         )
 
-    # 4. Single probe (1 request — 计入每日配额，因此只探一个模型)
+    # 4. Single probe (1 request — 计入每日配额，因此只探一个模型).
+    # When an account pool is configured, use the same per-account injection
+    # as `probe`/daemon so key-dimension limits are not misread as IP limits.
     version_for_headers = version if version != "unknown" else "unknown"
     injector = HeaderInjector(config.headers, version_for_headers)
+    probe_headers = injector.build_headers()
+    diagnosis_account: str | None = None
+    if config.account_pool.accounts:
+        from .pool import AccountPool
+
+        pool = AccountPool(config.account_pool)
+        account = pool.get_next()
+        if account is not None:
+            diagnosis_account = account.name
+            token = pool.resolve_token(account)
+            if token:
+                probe_headers = injector.build_headers(token=token)
     prober = ModelProber(config.daemon.probe_timeout_seconds, config.prober)
     try:
-        result = await prober.probe(model_name, injector.build_headers())
+        result = await prober.probe(model_name, probe_headers)
     except Exception as e:  # defensive: prober should not raise, but never crash
         logger.debug("probe crashed: %s", e)
         result = ProbeResult(model=model_name, status="error", error=f"internal: {e}")
     diagnosis.probe = result.to_dict()
+    if diagnosis_account:
+        diagnosis.probe["account"] = diagnosis_account
+        diagnosis.findings.append(
+            Finding(
+                "info",
+                f"诊断使用账号: {diagnosis_account}",
+                "探测携带该账号的凭证，与 probe/daemon 的轮换逻辑一致；"
+                "匿名对比可用 `probe` 不配账号池时复现。",
+            )
+        )
 
     findings, verdict, exit_code = _probe_findings(result, model_name)
     diagnosis.findings.extend(findings)

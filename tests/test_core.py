@@ -459,8 +459,10 @@ class TestCLI:
         assert parser.prog == "opencode-rate-limiter"
 
     def test_version_output(self):
-        """Version string is valid"""
-        assert __version__ == "0.3.0"
+        """Version string is valid (exact value owned by scripts/check_version.py)"""
+        import re
+
+        assert re.fullmatch(r"\d+\.\d+\.\d+", __version__), __version__
 
     def test_parser_has_all_subcommands(self):
         """All subcommands registered"""

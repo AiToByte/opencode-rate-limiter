@@ -4,7 +4,7 @@ OpenCode 免费模型限流缓解与账号池管理工具
 
 ## 状态
 
-**v0.3.0** - Phase 1–7 全部完成（发布流程见 [docs/release.md](docs/release.md)，迭代计划见 [docs/roadmap.md](docs/roadmap.md)）
+**v0.4.0** - Phase 1–7 全部完成 + 正确性/质量大修（发布流程见 [docs/release.md](docs/release.md)，迭代计划见 [docs/roadmap.md](docs/roadmap.md)）
 
 > 文档：**[使用手册](docs/user-guide.md)** · [功能介绍](docs/features.md) ·
 > [技术架构](docs/architecture.md) · [实现细节](docs/implementation.md) ·
@@ -44,7 +44,7 @@ uv run opencode-rate-limiter --help
 | `generate-launchd` | 生成 macOS launchd plist |
 | `generate-task` | 生成 Windows 任务计划 XML |
 | `generate-config` | 生成默认配置文件（已存在需 `--force`） |
-| `completions` | 生成 shell 补全脚本 (bash/zsh/fish) |
+| `completions` | 生成 shell 补全脚本 (bash/zsh/fish/powershell) |
 
 ## Shell 补全
 

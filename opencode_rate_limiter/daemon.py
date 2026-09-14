@@ -9,6 +9,7 @@ import datetime as _dt
 import json
 import logging
 import os
+import random
 import signal
 import subprocess
 import sys
@@ -18,6 +19,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from queue import Queue
 from typing import Any, cast
 
 from platformdirs import user_state_dir
@@ -31,8 +33,24 @@ from .prober import ModelProber, ProbeResult
 
 
 def _now() -> _dt.datetime:
-    """Current UTC time (naive, for stable isoformat round-trips)"""
-    return _dt.datetime.now(_dt.UTC).replace(tzinfo=None)
+    """Current UTC time (timezone-aware; persisted as ISO-8601)."""
+    return _dt.datetime.now(_dt.UTC)
+
+
+def _parse_cooldown_deadline(raw: Any) -> _dt.datetime | None:
+    """Parse a persisted cooldown deadline (aware ISO, trailing Z, or legacy naive)."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        moment = _dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=_dt.UTC)
+    return moment.astimezone(_dt.UTC)
 
 
 def _now_iso() -> str:
@@ -167,6 +185,10 @@ class RateLimiterDaemon:
         self._probe_count = 0
         self._prev_handlers: dict[int, Any] = {}
         self._signal_fallback_sigs: list[int] = []
+        self._budget_cursor = 0
+        self._notify_queue: Queue[dict[str, Any]] = Queue()
+        self._notify_worker_started = False
+        self._notify_worker_lock = threading.Lock()
         self._rebuild()
 
     def _effective_interval(self) -> int:
@@ -204,8 +226,26 @@ class RateLimiterDaemon:
         event = {"ts": _now_iso(), "kind": kind, **fields}
         self.status.events.append(event)
         if self.config.daemon.notify_webhook or self.config.daemon.notify_command:
-            # Fire-and-forget: notifications must never block or fail the loop
-            threading.Thread(target=self._notify_sync, args=(event,), daemon=True).start()
+            # Fire-and-forget through one daemon worker: delivery never
+            # blocks the loop, never piles up threads, and never keeps the
+            # process alive at teardown.
+            with self._notify_worker_lock:
+                if not self._notify_worker_started:
+                    threading.Thread(
+                        target=self._notify_worker, daemon=True, name="notify-worker"
+                    ).start()
+                    self._notify_worker_started = True
+            self._notify_queue.put(dict(event))
+
+    def _notify_worker(self) -> None:
+        while True:
+            event = self._notify_queue.get()
+            try:
+                self._notify_sync(event)
+            except Exception as e:  # defensive: the worker must never die
+                self.log.debug("Notify worker error: %s", e)
+            finally:
+                self._notify_queue.task_done()
 
     def _notify_sync(self, event: dict[str, Any]) -> None:
         """Dispatch one event to the configured webhook / command hook.
@@ -224,9 +264,7 @@ class RateLimiterDaemon:
                     timeout=5.0,
                 )
                 if resp.status_code >= 300:
-                    self.log.warning(
-                        "Notify webhook returned %s", resp.status_code
-                    )
+                    self.log.warning("Notify webhook returned %s", resp.status_code)
             except Exception as e:
                 self.log.warning("Notify webhook failed: %s", e)
 
@@ -258,14 +296,13 @@ class RateLimiterDaemon:
                 self._probe_count = int(usage.get("count", 0))
         cooldowns = state.get("cooldowns") if state else None
         if isinstance(cooldowns, dict):
-            now_utc = _dt.datetime.now(_dt.UTC).replace(tzinfo=None)
+            now_utc = _dt.datetime.now(_dt.UTC)
             now_mono = time.monotonic()
             for model, raw in cooldowns.items():
-                try:
-                    deadline = _dt.datetime.fromisoformat(str(raw))
-                    remaining = (deadline - now_utc).total_seconds()
-                except (TypeError, ValueError):
+                deadline = _parse_cooldown_deadline(raw)
+                if deadline is None:
                     continue
+                remaining = (deadline - now_utc).total_seconds()
                 if remaining > 0:
                     self._cooldowns[str(model)] = now_mono + remaining
 
@@ -293,7 +330,11 @@ class RateLimiterDaemon:
                         "All probes errored; backing off",
                         extra={"wait_seconds": wait_seconds, "error_streak": self._error_streak},
                     )
-                await self._wait(wait_seconds)
+                # Small jitter (±5%, capped at ±30s) so identically
+                # configured instances do not hammer the gateway in lockstep.
+                jitter = random.uniform(-0.05, 0.05) * wait_seconds
+                jitter = max(-30.0, min(30.0, jitter))
+                await self._wait(max(1, int(wait_seconds + jitter)))
         finally:
             self.status.running = False
             self._running = False
@@ -418,11 +459,19 @@ class RateLimiterDaemon:
         if budget:
             remaining = budget - self._probe_count
             if len(active) > remaining:
+                # Rotate the slice start each trimmed cycle so tail models
+                # are not starved by a fixed head-first truncation.
+                start = self._budget_cursor % len(active)
+                rotated = active[start:] + active[:start]
+                trimmed = rotated[:remaining]
+                self._budget_cursor = (start + len(trimmed)) % len(active)
                 self.log.info(
                     "Trimming probe batch to daily budget",
                     extra={"models": len(active), "remaining": remaining},
                 )
-                active = active[:remaining]
+                active = trimmed
+            else:
+                self._budget_cursor = 0
 
         self.log.info("Starting probe cycle", extra={"models": len(active)})
 
@@ -573,13 +622,19 @@ class RateLimiterDaemon:
                     error_type=result.error_type,
                 )
             if result.error_type == "RateLimitError" and name is not None:
-                # Key-dimension limit: cool this account down for a minute
-                self._key_cooldowns[name] = time.monotonic() + 60
-                self._record_event("key_cooldown", account=name, seconds=60)
-                self.log.info(
-                    "Key cooldown armed",
-                    extra={"account": name, "seconds": 60, "error_type": result.error_type},
-                )
+                # Key-dimension limit: cool this account down (configurable).
+                cooldown_s = self.config.daemon.key_cooldown_seconds
+                if cooldown_s > 0:
+                    self._key_cooldowns[name] = time.monotonic() + cooldown_s
+                    self._record_event("key_cooldown", account=name, seconds=cooldown_s)
+                    self.log.info(
+                        "Key cooldown armed",
+                        extra={
+                            "account": name,
+                            "seconds": cooldown_s,
+                            "error_type": result.error_type,
+                        },
+                    )
             if len(self.pool.accounts) > 1:
                 next_account = self.pool.get_next()
                 if next_account is not None:

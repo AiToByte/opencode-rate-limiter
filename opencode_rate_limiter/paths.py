@@ -44,8 +44,9 @@ def get_opencode_config_dirs() -> list[Path]:
         if localappdata:
             dirs.append(Path(localappdata) / "opencode")
 
-    # Linux XDG
-    else:
+    # Linux / other Unix (XDG). macOS and Windows already have their
+    # platform branches above and must not also collect XDG paths.
+    elif sys.platform != "darwin":
         xdg_config = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
         dirs.append(Path(xdg_config) / "opencode")
         xdg_state = os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
@@ -78,15 +79,42 @@ def get_opencode_auth_files() -> list[Path]:
     return auth_files
 
 
+_VERSION_CACHE: dict[str, str] = {"value": "", "at": "0"}
+_VERSION_TTL_SECONDS = 300.0
+
+
+def clear_opencode_version_cache() -> None:
+    """Reset the cached `opencode --version` probe (mainly for tests)."""
+    _VERSION_CACHE["value"] = ""
+    _VERSION_CACHE["at"] = "0"
+
+
 def get_opencode_version() -> str:
     """Detect OpenCode CLI version
 
     `OPENCODE_VERSION` env var overrides detection (useful for containers or
-    when the opencode binary is not on PATH).
+    when the opencode binary is not on PATH). Subprocess results are cached
+    for 5 minutes; the env override always bypasses the cache.
     """
+    import time as _time
+
     override = os.environ.get("OPENCODE_VERSION")
     if override:
         return override
+    try:
+        age = _time.monotonic() - float(_VERSION_CACHE["at"])
+    except (TypeError, ValueError):
+        age = float("inf")
+    if _VERSION_CACHE["value"] and age < _VERSION_TTL_SECONDS:
+        return _VERSION_CACHE["value"]
+    version = _detect_opencode_version()
+    if version != "unknown":
+        _VERSION_CACHE["value"] = version
+        _VERSION_CACHE["at"] = str(_time.monotonic())
+    return version
+
+
+def _detect_opencode_version() -> str:
     try:
         import subprocess
         from shutil import which

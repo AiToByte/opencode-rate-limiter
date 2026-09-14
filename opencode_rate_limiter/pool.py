@@ -61,8 +61,9 @@ class AccountHealth:
         # Success rate
         success_score = self.success_rate
 
-        # Latency score: 100ms = 1.0, >1000ms = 0.0
-        latency_score = max(0.0, 1.0 - (self.avg_latency_ms - 100) / 900)
+        # Latency score: 100ms = 1.0, >1000ms = 0.0 (clamped; a fresh
+        # account with avg 0 must not score above 1.0).
+        latency_score = min(1.0, max(0.0, 1.0 - (self.avg_latency_ms - 100) / 900))
 
         # Recency score: 0h = 0.0, 24h+ = 1.0
         hours_since_error = (
@@ -282,7 +283,7 @@ class AccountPool:
             return None
 
         if account.auth_path:
-            path = Path(account.auth_path).expanduser()
+            path = Path(os.path.expandvars(str(Path(account.auth_path).expanduser())))
             if path.exists():
                 try:
                     with open(path, encoding="utf-8") as f:

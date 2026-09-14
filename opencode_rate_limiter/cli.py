@@ -26,6 +26,18 @@ from .paths import (
 )
 from .pool import Account, AccountPool, build_auth_payload, credential_fingerprint
 from .prober import ModelProber, ProbeResult
+from .render import (
+    account_credential_info as _account_credential_info_impl,
+)
+from .render import (
+    probe_diff_against_daemon as _probe_diff_against_daemon_impl,
+)
+from .render import (
+    render_events as _render_events_impl,
+)
+from .render import (
+    render_trend as _render_trend_impl,
+)
 from .service import (
     _default_config_path_str,
     generate_launchd_plist,
@@ -152,7 +164,9 @@ async def cmd_probe(config: Config, args: argparse.Namespace) -> int:
                 print(f"      error: {r.error}")
 
     if not args.json:
-        diff = _probe_diff_against_daemon(results)
+        import asyncio as _asyncio
+
+        diff = await _asyncio.to_thread(_probe_diff_against_daemon, results)
         if diff:
             print(f"\n  {diff}")
 
@@ -178,10 +192,14 @@ def _apply_account_auth(
 ) -> tuple[str, str | None]:
     """Write the account's auth JSON into the active OpenCode auth.json
 
-    Backs up the existing file to `<name>.json.bak` first (same convention as
-    CleanupManager.rotate_auth_tokens). Returns (status, target_path) where
-    status is "applied", "dry_run", or an error string.
+    Backs up the existing file to `<name>.json.bak` first (rotating any
+    previous backup to a timestamped copy, same convention as
+    CleanupManager.backup_auth_files) and writes the new payload atomically
+    (tmp file + os.replace). Returns (status, target_path) where status is
+    "applied", "dry_run", or an error string.
     """
+
+    import datetime as _dt_inner
 
     auth = pool.read_auth(account)
     if not auth:
@@ -195,18 +213,25 @@ def _apply_account_auth(
 
     if target.exists():
         backup = target.with_suffix(".json.bak")
-        shutil.copy(target, backup)
+        if backup.exists():
+            stamp = _dt_inner.datetime.now(_dt_inner.UTC).strftime("%Y%m%dT%H%M%SZ")
+            shutil.copy2(backup, target.with_suffix(f".json.bak.{stamp}"))
+        shutil.copy2(target, backup)
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = build_auth_payload(auth)
-    target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp = target.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(target)
     return "applied", str(target)
 
 
 async def cmd_rotate(config: Config, args: argparse.Namespace) -> int:
     log = logging.getLogger("cmd.rotate")
 
-    # Override strategy if provided via CLI
-    config.account_pool.strategy = args.strategy
+    # Override strategy only when the flag was explicitly given (default None
+    # keeps the configured strategy).
+    strategy = getattr(args, "strategy", None) or config.account_pool.strategy
+    config.account_pool.strategy = strategy
     pool = AccountPool(config.account_pool)
 
     if not pool.accounts:
@@ -240,7 +265,7 @@ async def cmd_rotate(config: Config, args: argparse.Namespace) -> int:
         "Rotating to account",
         extra={
             "account": next_account.name,
-            "strategy": args.strategy,
+            "strategy": strategy,
             "dry_run": args.dry_run,
             "auth_token": token is not None,
         },
@@ -251,7 +276,7 @@ async def cmd_rotate(config: Config, args: argparse.Namespace) -> int:
             json.dumps(
                 {
                     "rotated_to": next_account.name,
-                    "strategy": args.strategy,
+                    "strategy": strategy,
                     "accounts": [a.name for a in pool.accounts],
                     "auth_token_resolved": token is not None,
                     "credential": (
@@ -272,7 +297,7 @@ async def cmd_rotate(config: Config, args: argparse.Namespace) -> int:
         )
     else:
         print(f"Rotated to account: {next_account.name}")
-        print(f"Strategy: {args.strategy}")
+        print(f"Strategy: {strategy}")
         print(f"Available accounts: {', '.join(a.name for a in pool.accounts)}")
         if credential:
             print(f"Credential: {credential[0]} ({credential_fingerprint(credential[1])})")
@@ -289,84 +314,24 @@ async def cmd_rotate(config: Config, args: argparse.Namespace) -> int:
 
 
 def _account_credential_info(config: Config, account: Account) -> dict[str, str] | None:
-    """Resolve a single account's credential for display (kind + fingerprint)"""
+    """Resolve a single account's credential for display (kind + fingerprint)."""
     pool = AccountPool(config.account_pool)
-    try:
-        cred = pool.resolve_credential(account)
-    except Exception:
-        return None
-    if not cred:
-        return None
-    return {"kind": cred[0], "fingerprint": credential_fingerprint(cred[1])}
+    return _account_credential_info_impl(pool, account)
 
 
 _TREND_LETTERS = {"available": "a", "rate_limited": "!", "error": "x", "unknown": "?"}
 
 
 def _render_trend(history: list[dict[str, Any]], width: int = 30) -> list[str]:
-    """Render a per-model status grid over the recorded probe rounds.
-
-    Columns run old -> new; "." marks rounds where a model was not probed
-    (e.g. skipped by cooldown or budget).
-    """
-    rounds = history[-width:]
-    models: list[str] = []
-    for entry in rounds:
-        for model in entry.get("models", {}):
-            if model not in models:
-                models.append(model)
-    lines = []
-    name_width = max((len(m) for m in models), default=5)
-    for model in models:
-        cells = [
-            _TREND_LETTERS.get(entry.get("models", {}).get(model, ""), ".") for entry in rounds
-        ]
-        lines.append(f"    {model:<{name_width}}  {' '.join(cells)}")
-    lines.append("    （左→右 = 旧→新；a=可用 !=限流 x=错误 .=未探测）")
-    return lines
+    return _render_trend_impl(history, width)
 
 
 def _render_events(events: list[dict[str, Any]], limit: int = 5) -> list[str]:
-    """Render the most recent decision events, newest first"""
-    lines = []
-    for event in reversed(events[-limit:]):
-        ts = str(event.get("ts", ""))[:19]
-        extras = ", ".join(f"{k}={v}" for k, v in event.items() if k not in ("ts", "kind"))
-        suffix = f" ({extras})" if extras else ""
-        lines.append(f"    {ts}Z  {event.get('kind', '?')}{suffix}")
-    return lines
+    return _render_events_impl(events, limit)
 
 
 def _probe_diff_against_daemon(results: list[ProbeResult]) -> str | None:
-    """Compare probe results against the daemon's last recorded round.
-
-    Returns a one-line summary of newly-limited / recovered models, or None
-    when there is no previous round or nothing changed.
-    """
-    state = load_daemon_state()
-    if not state:
-        return None
-    prev = state.get("models")
-    if not isinstance(prev, dict):
-        return None
-    prev_status = {
-        model: entry.get("status") for model, entry in prev.items() if isinstance(entry, dict)
-    }
-    now_limited = {r.model for r in results if r.status == "rate_limited"}
-    newly_limited = sorted(m for m in now_limited if prev_status.get(m) != "rate_limited")
-    recovered = sorted(
-        r.model
-        for r in results
-        if r.status == "available" and prev_status.get(r.model) == "rate_limited"
-    )
-    if not newly_limited and not recovered:
-        return None
-    parts = []
-    if newly_limited:
-        parts.append("新增限流: " + ", ".join(newly_limited))
-    if recovered:
-        parts.append("已恢复: " + ", ".join(recovered))
-    return "与 daemon 上一轮相比 — " + "; ".join(parts)
+    return _probe_diff_against_daemon_impl(results)
 
 
 async def cmd_check(config: Config, args: argparse.Namespace) -> int:
@@ -374,6 +339,7 @@ async def cmd_check(config: Config, args: argparse.Namespace) -> int:
     log.info("Running health check")
 
     version = get_opencode_version()
+    shared_pool = AccountPool(config.account_pool) if config.account_pool.accounts else None
     health = {
         "timestamp": _dt.datetime.now(_dt.UTC).isoformat().replace("+00:00", "Z"),
         "config_valid": True,
@@ -393,9 +359,7 @@ async def cmd_check(config: Config, args: argparse.Namespace) -> int:
                     "auth_path": a.auth_path,
                     "env_var": a.env_var,
                     "credential": (
-                        _account_credential_info(config, a)
-                        if config.account_pool.accounts
-                        else None
+                        _account_credential_info_impl(shared_pool, a) if shared_pool else None
                     ),
                 }
                 for a in [Account(**acc) for acc in config.account_pool.accounts]

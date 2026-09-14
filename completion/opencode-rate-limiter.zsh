@@ -6,7 +6,7 @@ _opencode_rate_limiter() {
 
     commands=(
         'check:健康检查聚合输出'
-        'completions:生成 shell 补全脚本 (bash/zsh/fish)'
+        'completions:生成 shell 补全脚本 (bash/zsh/fish/powershell)'
         'daemon:后台守护进程模式'
         'deep:深度维护：quick + 清缓存'
         'diagnose:Zen 限额诊断（出口 IP / 代理 / 错误层级 / 建议）'

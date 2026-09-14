@@ -13,8 +13,13 @@ def main() -> int:
     project_root = Path(__file__).resolve().parent.parent
     output_dir = project_root / "completion"
     output_dir.mkdir(exist_ok=True)
-    for shell in ("bash", "zsh", "fish"):
-        output_path = output_dir / f"opencode-rate-limiter.{shell}"
+    for shell, filename in (
+        ("bash", "opencode-rate-limiter.bash"),
+        ("zsh", "opencode-rate-limiter.zsh"),
+        ("fish", "opencode-rate-limiter.fish"),
+        ("powershell", "opencode-rate-limiter.ps1"),
+    ):
+        output_path = output_dir / filename
         output_path.write_text(generate_completions(shell), encoding="utf-8")
         print(f"Generated shell completion: {output_path}")
     return 0

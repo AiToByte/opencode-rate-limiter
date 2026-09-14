@@ -187,6 +187,12 @@ def _fish_completion(payload: dict[str, Any]) -> str:
             '-a "(__fish_%s_strategies)"' % (prog, func)
         )
 
+    global_lines = "\n".join(
+        "    -l %s \\" % flag.lstrip("-")
+        for flag in sorted(payload["global_options"])
+        if flag.startswith("--") and flag not in ("--help",)
+    )
+
     return """# %(prog)s fish completion
 function __fish_%(func)s_commands
     set -l commands \\
@@ -220,12 +226,7 @@ complete -c %(prog)s -f -n "__fish_seen_subcommand_from probe" \\
 %(extra)s
 
 complete -c %(prog)s -f \\
-    -l config \\
-    -l json \\
-    -l verbose \\
-    -l quiet \\
-    -l dry-run \\
-    -l version
+%(globals)s
 """ % {
         "prog": prog,
         "func": func,
@@ -233,11 +234,64 @@ complete -c %(prog)s -f \\
         "models": models_block,
         "strategies": strategies_line,
         "extra": "\n".join(extra),
+        "globals": global_lines,
+    }
+
+
+def _powershell_completion(payload: dict[str, Any]) -> str:
+    """Native PowerShell argument completer (Register-ArgumentCompleter)."""
+    prog = payload["prog"]
+    commands = "\n".join('        "%s"' % c["name"] for c in payload["commands"])
+    models = "\n".join('        "%s"' % m for m in payload["positional_choices"].get("probe", []))
+    strategies = " ".join('"%s"' % s for s in payload["choice_opt"].get("--strategy", []))
+    sub_cases = []
+    for name in sorted(payload["sub_options"]):
+        opts = payload["sub_options"][name]
+        if not opts:
+            continue
+        quoted = " ".join('"%s"' % o for o in opts)
+        sub_cases.append('        "%s" { @(%s) }' % (name, quoted))
+    return """# %(prog)s PowerShell completion
+# Install: add this file to your $PROFILE, e.g.
+#   opencode-rate-limiter completions powershell >> $PROFILE
+Register-ArgumentCompleter -Native -CommandName @('%(prog)s') -ScriptBlock {
+    param($wordToComplete, $commandAst, $cursorPosition)
+    $commands = @(
+%(commands)s
+    )
+    $probeModels = @(
+%(models)s
+    )
+    $strategies = @(%(strategies)s)
+    $elements = $commandAst.ToString() -split '\\s+'
+    $sub = $elements | Where-Object { $_ -in $commands } | Select-Object -First 1
+    if (-not $sub) {
+        $commands | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+            [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+        }
+        return
+    }
+    $candidates = switch ($sub) {
+%(cases)s
+        default { @() }
+    }
+    if ($sub -eq 'probe') { $candidates += $probeModels }
+    if ($elements -contains '--strategy') { $candidates += $strategies }
+    $candidates | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+        [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+    }
+}
+""" % {
+        "prog": prog,
+        "commands": commands,
+        "models": models,
+        "strategies": (" " + strategies) if strategies else "",
+        "cases": "\n".join(sub_cases),
     }
 
 
 def generate_completions(shell: str) -> str:
-    """Generate a shell completion script (bash / zsh / fish) for the CLI."""
+    """Generate a shell completion script (bash / zsh / fish / powershell)."""
     payload = _completion_payload()
     if shell == "bash":
         return _bash_completion(payload)
@@ -245,4 +299,6 @@ def generate_completions(shell: str) -> str:
         return _zsh_completion(payload)
     if shell == "fish":
         return _fish_completion(payload)
+    if shell == "powershell":
+        return _powershell_completion(payload)
     raise ValueError(f"Unsupported shell: {shell}")

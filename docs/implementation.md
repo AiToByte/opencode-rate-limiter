@@ -1,6 +1,6 @@
 # opencode-rate-limiter 技术实现细节文档
 
-版本：0.3.0（2026-09） · 配套：[architecture.md](architecture.md)（为什么） ·
+版本：0.4.0（2026-09） · 配套：[architecture.md](architecture.md)（为什么） ·
 本文讲"具体怎么实现的"，函数/字段名与当前代码一致。
 
 ---
@@ -263,10 +263,9 @@ remedy}` 列表并决定 `verdict/exit_code`：
 
 ## 10. 已知实现限制
 
-1. `cooldowns` 仅存内存，daemon 重启后冷却清零（预算计数则跨重启）。
-2. `_merge` 对嵌套表整表替换；部分配置（如只写一个 score_weight）会被拒绝而非合并。
+1. `cooldowns` 以绝对 UTC 时刻随状态文件持久化，daemon 重启后恢复剩余冷却（R4；预算计数同样跨重启）。
+2. `_merge` 对嵌套表做一层深合并；部分 `score_weights` 与"和为 1"校验冲突时会被明确拒绝（见 config 章节）。
 3. 出口 IP 检测反映的是**本工具**的路径；opencode CLI 是否同路径取决于其启动环境
    （诊断报告会明示这一点）。
 4. 补全的 fish 分支按"选项是否含 choices"过滤，极少数组合可能少列选项。
-5. Windows 任务计划 XML 以 UTF-8 文本输出但声明 UTF-16，导入 schtasks 前需按
-   MANUAL 指引转换（历史行为，保留兼容）。
+5. Windows 任务计划 XML 以 UTF-8 声明 + UTF-8 文本输出（R4 已对齐，可直接导入 schtasks）。

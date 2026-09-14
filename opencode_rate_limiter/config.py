@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import os
 import tomllib
 from dataclasses import dataclass, field
@@ -49,6 +51,8 @@ class DaemonConfig:
     # Hard cap on probe requests per UTC day (0 = unlimited). The server
     # counts every probe against the IP's free daily quota.
     daily_probe_budget: int = 200
+    # Key-dimension cooldown for accounts that hit RateLimitError (seconds).
+    key_cooldown_seconds: int = 60
 
     def validate(self) -> None:
         if self.interval_seconds < 5:
@@ -63,10 +67,10 @@ class DaemonConfig:
             raise ValueError(f"event_history_size must be >= 1, got {self.event_history_size}")
         if self.daily_probe_budget < 0:
             raise ValueError(f"daily_probe_budget must be >= 0, got {self.daily_probe_budget}")
+        if self.key_cooldown_seconds < 0:
+            raise ValueError(f"key_cooldown_seconds must be >= 0, got {self.key_cooldown_seconds}")
         if self.notify_webhook and not self.notify_webhook.startswith(("http://", "https://")):
-            raise ValueError(
-                f"notify_webhook must be an http(s) URL, got {self.notify_webhook}"
-            )
+            raise ValueError(f"notify_webhook must be an http(s) URL, got {self.notify_webhook}")
 
 
 @dataclass
@@ -108,6 +112,10 @@ class AccountPoolConfig:
                 raise ValueError(
                     f"accounts[{i}] missing auth source (auth_path, env_var, or auth_json)"
                 )
+        names = [str(acc.get("name")) for acc in self.accounts if isinstance(acc, dict)]
+        if len(set(names)) != len(names):
+            dupes = sorted({n for n in names if names.count(n) > 1})
+            raise ValueError(f"duplicate account names: {dupes}")
 
 
 @dataclass
@@ -138,6 +146,14 @@ class HeadersConfig:
     user_agent: str = "opencode/{version}"
     x_opencode_client: str = "opencode-cli"
     x_opencode_version: str = "{version}"
+
+    def validate(self) -> None:
+        for field_name in ("user_agent", "x_opencode_client", "x_opencode_version"):
+            value = getattr(self, field_name)
+            try:
+                value.format(version="", model="")
+            except (KeyError, IndexError, ValueError) as e:
+                raise ValueError(f"headers.{field_name} has an unsupported placeholder: {e}") from e
 
 
 @dataclass
@@ -247,6 +263,14 @@ class Config:
         # Boolean
         if value.lower() in ("true", "false"):
             return value.lower() == "true"
+        # JSON first: covers quoted strings, numbers, lists and objects
+        # without mistaking URLs or paths containing commas for lists.
+        stripped = value.strip()
+        if stripped[:1] in ("[", "{", '"'):
+            try:
+                return json.loads(stripped)
+            except (json.JSONDecodeError, ValueError):
+                pass
         # Integer
         try:
             return int(value)
@@ -257,8 +281,8 @@ class Config:
             return float(value)
         except ValueError:
             pass
-        # List (comma-separated)
-        if "," in value:
+        # List (comma-separated, only when it does not look like a URL/path)
+        if "," in value and "://" not in value and "/" not in value:
             return [v.strip() for v in value.split(",")]
         # String
         return value
@@ -292,13 +316,13 @@ class Config:
 
     @classmethod
     def _merge(cls, base: Config, override: dict[str, Any]) -> Config:
-        """Merge override dict into base config"""
+        """Merge override dict into base config (base is never mutated)"""
         result = cls(
-            daemon=base.daemon,
-            account_pool=base.account_pool,
-            prober=base.prober,
-            headers=base.headers,
-            cleanup=base.cleanup,
+            daemon=copy.deepcopy(base.daemon),
+            account_pool=copy.deepcopy(base.account_pool),
+            prober=copy.deepcopy(base.prober),
+            headers=copy.deepcopy(base.headers),
+            cleanup=copy.deepcopy(base.cleanup),
         )
 
         # Merge daemon
@@ -342,6 +366,7 @@ class Config:
         self.daemon.validate()
         self.account_pool.validate()
         self.prober.validate()
+        self.headers.validate()
         self.cleanup.validate()
 
     def _expand_paths(self) -> None:
@@ -375,7 +400,10 @@ class Config:
     def save(self, path: Path) -> None:
         """Save config to TOML file"""
         if tomli_w is None:
-            raise RuntimeError("tomli_w not installed, cannot save config")
+            raise RuntimeError(
+                "tomli_w not installed, cannot save config "
+                "(install with: pip install 'opencode-rate-limiter' or 'tomli-w')"
+            )
 
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -399,6 +427,7 @@ class Config:
                 ),
                 "respect_cooldown": self.daemon.respect_cooldown,
                 "daily_probe_budget": self.daemon.daily_probe_budget,
+                "key_cooldown_seconds": self.daemon.key_cooldown_seconds,
             },
             "account_pool": {
                 "accounts": self.account_pool.accounts,

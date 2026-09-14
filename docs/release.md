@@ -1,18 +1,23 @@
 # 发布流程（Release Checklist）
 
-适用于 0.3.0 及以后。发布由 **tag 驱动**：推送 `v*` tag 后
+版本：0.4.0 · 适用于 0.4.0 及以后。发布由 **tag 驱动**：推送 `v*` tag 后
 `.github/workflows/release.yml` 自动完成版本校验 → 测试 → 三平台二进制 →
 GitHub Release（含 SHA256SUMS）→ PyPI 发布。
+
+> 版本一致性由 `scripts/check_version.py` 统一断言：meta.py /
+> pyproject.toml / man 页 / MANUAL 头 / 四份 docs 头 / README 状态行一致，
+> 且 CHANGELOG 含对应 `## [<版本>]` 条目。
 
 ---
 
 ## 1. 发布前检查清单（手工）
 
-- [ ] `uv run pytest -q` 全绿；`uv run ruff check .` / `uv run mypy .` 通过
-- [ ] CHANGELOG：`[Unreleased]` 内容归并为 `[0.3.0] - <日期>`，破坏性变更显著标注
+- [ ] `uv run pytest -q` 全绿；`uv run ruff check .` / `uv run ruff format --check .` /
+      `uv run mypy .` 通过
+- [ ] CHANGELOG：`[Unreleased]` 内容归并为 `[<版本>] - <日期>`，破坏性变更显著标注
 - [ ] 四份 `docs/*.md` 头部版本号与 MANUAL 头部版本号同步
-- [ ] `uv run python scripts/check_version.py 0.3.0` 三处版本号一致
-      （meta.py / pyproject.toml / man 页）
+- [ ] `uv run python scripts/check_version.py <版本>` 全标记一致
+      （meta.py / pyproject.toml / man 页 / MANUAL / docs 头 / README / CHANGELOG 条目）
 - [ ] `docs/roadmap.md` 基线说明更新
 - [ ] 路线图中该迭代的验收标准逐条勾掉
 
@@ -29,15 +34,15 @@ uv run python scripts/check_version.py <new-version>   # 必须输出 All agree
 ## 3. 打 tag 发布
 
 ```bash
-git add -A && git commit -m "release: v0.3.0"
-git tag v0.3.0 && git push origin main --tags
+git add -A && git commit -m "release: v<版本>"
+git tag v<版本> && git push origin main --tags
 ```
 
 流水线阶段（全部自动）：
 
 | 阶段 | 内容 | 失败影响 |
 |------|------|----------|
-| check-version | `scripts/check_version.py` 断言三处版本一致且等于 tag 名 | 中止发布 |
+| check-version | `scripts/check_version.py` 断言全部版本标记一致且等于 tag 名 | 中止发布 |
 | test | 快速测试门（ubuntu） | 中止发布 |
 | build-binaries | 三平台 PyInstaller（入口 shim，产物 ~13 MB），每个二进制 `--version` + `check --json` 冒烟 | 中止发布 |
 | github-release | 汇总产物 + SHA256SUMS.txt → GitHub Release（自动生成 notes） | 仅缺 Release 资产 |
@@ -48,8 +53,8 @@ git tag v0.3.0 && git push origin main --tags
 - [ ] GitHub Release 页面：3 个二进制 + `SHA256SUMS.txt`，notes 完整
 - [ ] `sha256sum -c SHA256SUMS.txt` 本地校验通过
 - [ ] 下载对应平台二进制：`--version` 输出正确版本
-- [ ] PyPI 页面可用：`uvx opencode-rate-limiter@0.3.0 --version` /
-      `pip install opencode-rate-limiter==0.3.0`
+- [ ] PyPI 页面可用：`uvx opencode-rate-limiter@<版本> --version` /
+      `pip install opencode-rate-limiter==<版本>`
 - [ ] 用户文档（README / docs / MANUAL）中的版本引用无残留旧版本
 
 ## 5. 一次性配置（首次发布前）
@@ -63,5 +68,5 @@ git tag v0.3.0 && git push origin main --tags
 ## 6. 热修复（hotfix）
 
 1. 从发布 tag 拉 `hotfix/x.y.z+1` 分支修复
-2. 走相同清单（版本号提到补丁号），tag `v0.3.1` 触发同一流水线
-3. CHANGELOG 补 `[0.3.1]` 条目
+2. 走相同清单（版本号提到补丁号），tag `v<版本>` 触发同一流水线
+3. CHANGELOG 补 `[<版本>]` 条目
