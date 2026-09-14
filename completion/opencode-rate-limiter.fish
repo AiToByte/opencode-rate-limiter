@@ -50,6 +50,7 @@ complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from probe" \
 
 complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from check" \
     -l trend
+    -l export-events
 complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from daemon" \
     -l interval
     -l models
@@ -71,6 +72,8 @@ complete -c opencode-rate-limiter -f \
     -l config \
     -l dry-run \
     -l json \
+    -l json-verbose \
+    -l log-file \
     -l quiet \
     -l verbose \
     -l version \

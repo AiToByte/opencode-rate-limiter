@@ -39,7 +39,7 @@ Register-ArgumentCompleter -Native -CommandName @('opencode-rate-limiter') -Scri
         return
     }
     $candidates = switch ($sub) {
-        "check" { @("--trend") }
+        "check" { @("--trend" "--export-events" "--export-format") }
         "daemon" { @("--interval" "--models" "--once" "--stop") }
         "diagnose" { @("--model") }
         "generate-config" { @("--force") }

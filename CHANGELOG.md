@@ -7,6 +7,25 @@ All notable changes to opencode-rate-limiter will be documented in this file.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-14
+
+### Added
+
+- **`--log-file PATH`**：日志同时追加到文件（1MB×4 `RotatingFileHandler`，
+  UTF-8，与 stderr 同格式），daemon 不再依赖外部收集器；子命令前后均可写。
+- **`--json-verbose`**：JSON 日志默认精简（timestamp/level/logger/message +
+  extras），该旗才附加 `module`/`function`/`line` 定位字段。
+- **`check --export-events FILE [--export-format jsonl|csv]`**：决策事件环落盘
+  （提 issue/复盘材料）；无 daemon 状态退出码 1，格式非法 2。
+
+### Changed
+
+- **默认日志级别 WARNING → INFO**：daemon 启动/周期/轮换开箱可见；
+  `-v` 保持 INFO 兼容，`-vv`/`-q` 不变。
+- **JSON 日志异常堆栈**：带 `exc_info` 的记录自动附 `exc` 堆栈文本；
+  不可序列化字段 `default=str` 兜底不再整行丢失。
+- **bash 路径补全**：`--log-file` 与 `--config` 同享文件补全。
+
 ## [0.5.0] - 2026-09-14
 
 ### Added

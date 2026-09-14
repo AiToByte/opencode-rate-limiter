@@ -368,6 +368,10 @@ async def cmd_check(config: Config, args: argparse.Namespace) -> int:
     log = logging.getLogger("cmd.check")
     log.info("Running health check")
 
+    export_path = getattr(args, "export_events", None)
+    if export_path:
+        return _export_daemon_events(args, export_path)
+
     version = get_opencode_version()
     shared_pool = AccountPool(config.account_pool) if config.account_pool.accounts else None
     health = {
@@ -498,6 +502,41 @@ async def cmd_check(config: Config, args: argparse.Namespace) -> int:
         f" | state_files={len(paths_info['state_files'])}"
         f" | auth_files={len(paths_info['auth_files'])}"
     )
+    return 0
+
+
+def _export_daemon_events(args: argparse.Namespace, export_path: Path | str) -> int:
+    """Write the daemon's decision-event ring to a file (jsonl/csv) for triage."""
+    import csv
+
+    fmt = getattr(args, "export_format", "jsonl")
+    if fmt not in ("jsonl", "csv"):
+        print(f"Unknown --export-format '{fmt}' (use --export-format jsonl|csv).")
+        return 2
+    state = load_daemon_state()
+    events = state.get("events") if isinstance(state, dict) else None
+    if not isinstance(events, list):
+        print("No daemon state with events found; is the daemon running?")
+        return 1
+    target = Path(export_path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if fmt == "jsonl":
+        with open(target, "w", encoding="utf-8") as f:
+            for event in events:
+                f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    else:
+        columns = ["ts", "kind"]
+        for event in events:
+            if isinstance(event, dict):
+                for key in event:
+                    if key not in columns:
+                        columns.append(key)
+        with open(target, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
+            writer.writeheader()
+            for event in events:
+                writer.writerow(event if isinstance(event, dict) else {})
+    print(f"Exported {len(events)} events to {target} ({fmt}).")
     return 0
 
 
@@ -686,7 +725,12 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    setup_logging(level_from_args(args), args.json)
+    setup_logging(
+        level_from_args(args),
+        args.json,
+        log_file=getattr(args, "log_file", None),
+        json_verbose=getattr(args, "json_verbose", False),
+    )
 
     if args.dry_run:
         logging.getLogger("main").info("DRY RUN MODE - no changes will be made")

@@ -25,9 +25,11 @@ _STRUCTURED_COMMANDS = frozenset(
 _GLOBAL_FLAGS = {
     "--config",
     "--json",
+    "--json-verbose",
     "--verbose",
     "--quiet",
     "--dry-run",
+    "--log-file",
     "--version",
     "--help",
     "-h",
@@ -56,9 +58,11 @@ Examples:
     )
     parser.add_argument("--config", type=Path, help="配置文件路径")
     parser.add_argument("--json", action="store_true", help="输出 JSON 格式日志")
+    parser.add_argument("--json-verbose", action="store_true", help="JSON 日志附带代码位置字段")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="详细输出 (-v, -vv)")
     parser.add_argument("-q", "--quiet", action="store_true", help="仅错误输出")
     parser.add_argument("--dry-run", action="store_true", help="预览模式，不修改文件")
+    parser.add_argument("--log-file", type=Path, default=None, help="追加日志到文件（自动轮转）")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     sub = parser.add_subparsers(dest="command", required=True, help="子命令")
@@ -71,6 +75,15 @@ Examples:
     )
     common.add_argument(
         "--dry-run", action="store_true", default=argparse.SUPPRESS, help="预览模式，不修改文件"
+    )
+    common.add_argument(
+        "--log-file", type=Path, default=argparse.SUPPRESS, help="追加日志到文件（自动轮转）"
+    )
+    common.add_argument(
+        "--json-verbose",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="JSON 日志附带代码位置字段",
     )
 
     def add_sub(name: str, help_text: str) -> argparse.ArgumentParser:
@@ -109,6 +122,15 @@ Examples:
 
     check_p = add_sub("check", "健康检查聚合输出")
     check_p.add_argument("--trend", action="store_true", help="附显示探测趋势网格与最近事件")
+    check_p.add_argument(
+        "--export-events", type=Path, default=None, help="把决策事件环导出到文件后退出"
+    )
+    check_p.add_argument(
+        "--export-format",
+        choices=["jsonl", "csv"],
+        default="jsonl",
+        help="事件导出格式（默认 jsonl）",
+    )
 
     diag_p = add_sub("diagnose", "Zen 限额诊断（出口 IP / 代理 / 错误层级 / 建议）")
     diag_p.add_argument("--model", help="探测的模型（默认取配置列表第一个；仅消耗 1 次配额）")

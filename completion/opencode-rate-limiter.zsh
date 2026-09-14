@@ -25,11 +25,13 @@ _opencode_rate_limiter() {
         '--help'
         '--config'
         '--json'
+        '--json-verbose'
         '-v'
         '--verbose'
         '-q'
         '--quiet'
         '--dry-run'
+        '--log-file'
         '--version'
     )
 
@@ -55,7 +57,7 @@ _opencode_rate_limiter() {
         ${options} \
         '(-)'{${commands}} \
         '--strategy: :($strategies)'
-        'check: :(--trend)'
+        'check: :(--trend --export-events --export-format)'
         'daemon: :(--interval --models --once --stop)'
         'diagnose: :(--model)'
         'generate-config: :(--force)'

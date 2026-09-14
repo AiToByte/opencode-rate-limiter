@@ -1,6 +1,6 @@
 # opencode-rate-limiter 技术说明与使用手册
 
-版本：0.5.0
+版本：0.6.0
 适用范围：本手册内容全部来自对 `opencode_rate_limiter/` 包实际代码的核对，不描述任何未实现的功能。场景化操作见 `docs/user-guide.md`，架构/实现/功能文档见
 `docs/`；早期拆分文档已移除，其历史差异结论保留在文末「实现事实与文档差异」。
 
@@ -74,7 +74,7 @@ opencode-rate-limiter/
 │   ├── build_binary.py        # PyInstaller 打包脚本
 │   └── generate_completions.py# 一键重新生成 completion/ 下的补全脚本
 ├── completion/                # bash / zsh / fish 补全脚本（已生成）
-├── tests/                     # pytest 测试（277 个）
+├── tests/                     # pytest 测试（286 个）
 ├── man/opencode-rate-limiter.1
 └── .github/workflows/ci.yml   # CI（含二进制构建与发布 job）
 ```
@@ -237,7 +237,7 @@ hy3-free, laguna-s-2.1-free, ling-3.0-flash-fin-free, nemotron-3.5-lightning-fre
 
 ```bash
 uv sync --dev          # 安装全部依赖（含开发依赖、lint、类型检查）
-uv run pytest          # 运行测试（277 个）
+uv run pytest          # 运行测试（286 个）
 uv run opencode-rate-limiter --help   # 临时运行
 ```
 
@@ -269,16 +269,18 @@ opencode-rate-limiter --version
 | 选项 | 说明 |
 |------|------|
 | `--config PATH` | 指定配置文件路径 |
-| `--json` | 日志 / 部分输出使用 JSON |
-| `-v, --verbose` | 日志级别递增：`-v`→INFO、`-vv`→DEBUG（默认 WARNING） |
+| `--json` | 日志 / 部分输出使用 JSON（默认精简字段；`--json-verbose` 附加代码位置） |
+| `--json-verbose` | JSON 日志附带 `module`/`function`/`line` 定位字段 |
+| `-v, --verbose` | `-vv`→DEBUG（默认已是 INFO，`-v` 保持兼容） |
 | `-q, --quiet` | 仅输出 ERROR 级日志 |
 | `--dry-run` | 预览模式不实际修改文件（**仅 quick / deep 与部分清理路径生效**，见 §13） |
+| `--log-file PATH` | 日志同时追加到文件（1MB×4 轮转，UTF-8；与 stderr 同格式） |
 | `--version` | 打印版本号并退出（argparse 内置，退出码 0） |
 | `-h, --help` | 帮助 |
 
 说明：
-- `--json` 与 `--dry-run` 通过共享父 parser（`common`）注入所有子命令，因此
-  `--json` 写在子命令前后都有效（未显式给出时保持父层值——`SUPPRESS` 默认值技巧）。
+- `--json`、`--dry-run`、`--log-file`、`--json-verbose` 通过共享父 parser（`common`）
+  注入所有子命令，因此写在子命令前后都有效（未显式给出时保持父层值——`SUPPRESS` 默认值技巧）。
 - 结构化输出命令（`check`、`probe`、`headers`、`generate-systemd`、`generate-launchd`、
   `generate-task`、`completions`）**不打印启动横幅**；其余命令（`quick`、`deep`、`rotate`、
   `daemon`）打印横幅，除非指定 `--json`。
@@ -420,6 +422,7 @@ opencode-rate-limiter rotate [--strategy round_robin|least_used|health] [--to NA
 
 ```
 opencode-rate-limiter check [--json] [--trend]
+opencode-rate-limiter check --export-events FILE [--export-format jsonl|csv]
 ```
 
 - 行为：默认输出**人读摘要**（版本 / 守护进程配置与运行时 / 账号池与健康度 /
@@ -896,8 +899,12 @@ schtasks /run /tn "OpenCode Rate Limiter"
 ### 6.6 监控
 
 - **状态查询**：`opencode-rate-limiter check --json`（合并运行时状态）。
-- **日志**：默认打 stderr；`--json` 时每行为一条 JSON：
-  `{timestamp, level, logger, message, ...extra}`。`-vv`（DEBUG）最详细。
+- **事件导出**：`check --export-events FILE [--export-format jsonl|csv]` 把决策
+  事件环落盘（提 issue/复盘材料）；无 daemon 状态时退出码 `1`，格式非法 `2`。
+- **日志**：默认 INFO 打 stderr；`--json` 时每行为一条精简 JSON：
+  `{timestamp, level, logger, message, ...extra}`（异常自动带 `exc` 堆栈）；
+  `--json-verbose` 追加 `module`/`function`/`line`；`-vv`（DEBUG）最详细。
+  `--log-file PATH` 同时落盘（1MB×4 轮转），daemon 无需外部收集器。
 - **日志器名**：`main`、`cmd.*`、`daemon`、`prober`、`cleanup`、`pool`。
   `httpx` / `httpcore` 日志被抑制到 WARNING。
 
@@ -918,6 +925,11 @@ opencode-rate-limiter completions zsh > ~/.zsh/functions/_opencode-rate-limiter
 opencode-rate-limiter completions fish > ~/.config/fish/completions/opencode-rate-limiter.fish
 ```
 
+```powershell
+# PowerShell（追加到 $PROFILE）
+opencode-rate-limiter completions powershell >> $PROFILE
+```
+
 也可以一次性重写仓库内的 `completion/` 脚本：
 
 ```bash
@@ -927,8 +939,8 @@ python scripts/generate_completions.py
 ### 7.2 覆盖范围
 
 - 子命令（基于真实 parser 的 `help`/`description`，与 `-h` 输出同源）
-- 全局选项：`--config`、`--json`、`--verbose`、`--quiet`、`--dry-run`、`--version`、
-  `--help`、`-h`
+- 全局选项：`--config`、`--json`、`--json-verbose`、`--verbose`、`--quiet`、
+  `--dry-run`、`--log-file`、`--version`、`--help`、`-h`
 - 各子命令专属选项（如 `probe --model`、`rotate --strategy`、`daemon --interval/--models`）
 - `--strategy` 的三值、`--config` 的文件路径补全（bash）、`probe` 位置参数的模型列表
   （`FREE_MODELS + all`）
@@ -1015,7 +1027,7 @@ opencode-rate-limiter -vv daemon
 ### 11.1 测试
 
 ```bash
-uv run pytest -q        # 277 passed
+uv run pytest -q        # 286 passed
 ```
 
 覆盖：核心清理（dry-run/备份/缓存）、探测（httpx mock 200/429/超时）、账号池读取

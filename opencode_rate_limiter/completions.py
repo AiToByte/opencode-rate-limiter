@@ -58,7 +58,9 @@ def _bash_completion(payload: dict[str, Any]) -> str:
     globals_flags = " ".join(payload["global_options"])
     opts_word = " ".join([commands, globals_flags])
 
-    case_lines = ['        --config) COMPREPLY=( $(compgen -f -- "${cur}") ); return 0 ;;']
+    case_lines = [
+        '        --config|--log-file) COMPREPLY=( $(compgen -f -- "${cur}") ); return 0 ;;'
+    ]
     for flag in sorted(payload["choice_opt"]):
         choices = " ".join(payload["choice_opt"][flag])
         case_lines.append(

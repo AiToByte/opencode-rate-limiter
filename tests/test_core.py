@@ -442,11 +442,11 @@ class TestLogging:
         assert level_from_args(args) == logging.DEBUG
 
     def test_level_from_args_default(self):
-        """Default = WARNING"""
+        """Default = INFO (daemon lifecycle visible without flags)"""
         args = MagicMock()
         args.quiet = False
         args.verbose = 0
-        assert level_from_args(args) == logging.WARNING
+        assert level_from_args(args) == logging.INFO
 
 
 class TestCLI:

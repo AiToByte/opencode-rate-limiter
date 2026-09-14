@@ -1,6 +1,6 @@
 # opencode-rate-limiter 功能详细介绍文档
 
-版本：0.5.0（2026-09） · 本文回答"每个功能是什么、解决什么问题、边界在哪"。
+版本：0.6.0（2026-09） · 本文回答"每个功能是什么、解决什么问题、边界在哪"。
 命令参数的逐项清单见 [MANUAL.md](../MANUAL.md)；实现原理见
 [implementation.md](implementation.md)。
 
@@ -212,8 +212,12 @@
 
 - **配置系统**：CLI > `$OPENCODE_RATE_LIMITER_CONFIG` > 平台目录 > 默认值；
   环境变量逐字段覆盖（双下划线分层、类型自动强转）；完整校验失败即退出码 2。
-- **日志**：stderr 上的人读/JSON Lines 双格式（JSON 时间戳为真 UTC）；`-v/-vv/-q`
-  控制级别；Windows GBK 控制台不中断。
+- **日志**：stderr 上的人读/JSON Lines 双格式（JSON 时间戳为真 UTC，异常自带
+  `exc` 堆栈）；默认 INFO（daemon 生命周期开箱可见），`-vv/-q` 调节；
+  `--json-verbose` 才附加代码位置字段；`--log-file` 落盘（1MB×4 轮转）；
+  Windows GBK 控制台不中断。
+- **事件导出**：`check --export-events FILE [--export-format jsonl|csv]` 把决策
+  事件环落盘，提 issue/复盘不再靠截屏。
 - **跨平台**：路径解析覆盖 `~/.opencode`、XDG、macOS Library、Windows
   APPDATA/LOCALAPPDATA；信号在 Windows 降级；进程存活检测双实现。
 - **明确不做的事**（诚实边界）：解除服务端限额、按账号提升免费额度、模拟"登录态"

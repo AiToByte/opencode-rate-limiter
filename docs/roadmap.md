@@ -242,3 +242,10 @@ R1 (key 轮换) ──► R2 (发布 0.3.0) ──► R3 (趋势/事件) ──�
 - `daemon --once`（单轮巡检，cron 友好，退出码沿 probe 语义）
 - `rotate --to NAME`（故障逃生直切，`explicit` 进 JSON/日志）
 - `daemon --stop`（SIGTERM + 10s 等待，跨平台；自锁拒绝防自杀）
+
+### v0.6.0 — C 轨可观测性（minor）
+
+- 默认日志 INFO（daemon 生命周期开箱可见，`-q` 仍可压制）
+- JSON 日志精简 + 异常堆栈常驻，`--json-verbose` 才带代码位置
+- `--log-file` 落盘（1MB×4 轮转，与 stderr 同格式）
+- `check --export-events FILE [--export-format jsonl|csv]` 事件落盘
