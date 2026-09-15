@@ -13,6 +13,7 @@ _STRUCTURED_COMMANDS = frozenset(
         "diagnose",
         "probe",
         "headers",
+        "explain",
         "generate-systemd",
         "generate-launchd",
         "generate-task",
@@ -134,6 +135,18 @@ Examples:
 
     diag_p = add_sub("diagnose", "Zen 限额诊断（出口 IP / 代理 / 错误层级 / 建议）")
     diag_p.add_argument("--model", help="探测的模型（默认取配置列表第一个；仅消耗 1 次配额）")
+    diag_p.add_argument(
+        "--from-text", default=None, help="离线分类一条报错文本（零配额，不发探测）"
+    )
+    diag_p.add_argument(
+        "--from-log", type=Path, default=None, help="离线分类日志文件（零配额，不发探测）"
+    )
+
+    explain_p = add_sub("explain", "解释一条 opencode 报错（离线分类，零配额）")
+    explain_p.add_argument("text", nargs="?", default=None, help="要分类的报错文本")
+    explain_p.add_argument(
+        "--from-log", type=Path, default=None, help="从日志文件逐行分类（零配额）"
+    )
 
     daemon_p = add_sub("daemon", "后台守护进程模式")
     daemon_p.add_argument("--interval", type=int, default=None, help="探测间隔（秒，最小 5）")

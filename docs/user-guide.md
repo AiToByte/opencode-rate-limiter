@@ -69,7 +69,9 @@ opencode-rate-limiter daemon
 ### 场景 A：收到 429，我该怎么办？
 
 ```bash
-opencode-rate-limiter diagnose
+opencode-rate-limiter diagnose        # 花 1 次配额，含出口 IP 核实
+# 配额已经见底、一分都不想花时：
+opencode-rate-limiter explain "把 TUI 里的报错原文粘贴进来"   # 零配额
 ```
 
 按报告的 `error.type` 对号入座：
@@ -78,7 +80,9 @@ opencode-rate-limiter diagnose
 |------------|------|----------|
 | `FreeUsageLimitError` | 出口 IP 的**每日配额**用尽 | 等 UTC 午夜重置（报告给出精确本地时刻）；或更换**出口 IP**。**换账号没有用**（配额键是 IP 不是账号） |
 | `RateLimitError` | 付费 key 超 1000 RPM | 等约 1 分钟 |
-| `server_error` | 网关/上游错误 | 与你无关，稍后重试或换模型 |
+| `server_error` / `UpstreamError` | 网关/上游错误 | 与你无关，稍后重试或换模型 |
+| `ReasoningReplayError`（`encrypted_content…not issued`） | 推理加密块会话污染，**不是限额** | 当前会话 `/clear` 或开新会话（勿 `--continue`）；同会话不换模型不换账号；切勿轮换账号 |
+| `TransientTransport`（socket closed / ECONNRESET） | 传输层瞬时中断，**不是限额** | 重试一次；确认代理/TUN；大 context 先 `/compact` |
 | `AuthError` / `MonthlyLimitError` 等 | 账号/计费层 | 检查凭证或订阅，与 IP 无关 |
 | 探测未达网关 | 网络/代理链路问题 | 见场景 B |
 
@@ -225,9 +229,9 @@ score_weights = { success = 0.5, latency = 0.3, recency = 0.2 }
 
 | 码 | 含义 |
 |----|------|
-| 0 | 成功（`diagnose`=健康） |
-| 1 | 业务失败：清理出错 / `probe` 有模型被限 / `rotate` 无账号或凭证不可解析 / `diagnose` 被限流 / daemon 已有实例 |
-| 2 | 配置错误（TOML/校验）/ argparse 用法错误 / `diagnose` 网络层失败 |
+| 0 | 成功（`diagnose`=健康；`explain` 未命中已知错误） |
+| 1 | 业务失败：清理出错 / `probe` 有模型被限 / `rotate` 无账号或凭证不可解析 / `diagnose` 被限流 / `explain`·`diagnose --from-*` 离线命中限额 / daemon 已有实例 |
+| 2 | 配置错误（TOML/校验）/ argparse 用法错误 / `diagnose` 网络层失败 / `explain`·`diagnose --from-*` 离线命中错误类或无输入 |
 | 130 | Ctrl+C 中断 |
 
 ---
@@ -253,6 +257,15 @@ score_weights = { success = 0.5, latency = 0.3, recency = 0.2 }
 **Q5：探测全是 error(timeout)？**
 网络/代理问题：检查代理端口是否监听、节点是否可用、`HTTPS_PROXY` 是否设置；
 或调大 `[daemon].probe_timeout_seconds`。
+
+**Q5b：`socket connection was closed unexpectedly` 是限额吗？**
+不是，是传输层瞬时中断（网关掐连接/代理不稳/长 context stream 超时）。
+重试一次，大 context 先 `/compact`，再用 `explain "<原文>"` 零配额确认。
+
+**Q5c：`encrypted_content was not issued to this caller` 怎么修？**
+这是推理加密块会话污染（换 key/换模型/`--continue` 老会话/网关换上游所致），
+与限额无关：当前会话 `/clear` 或开新会话（勿 `--continue`），同会话内不换
+模型不换账号，切勿轮换账号抢救。
 
 **Q6：`check` 显示的 daemon 信息是旧的/没有？**
 `daemon.json` 由 daemon 进程写入；没跑过 daemon 就没有运行时字段。

@@ -15,6 +15,7 @@ from .cli import (
     cmd_daemon_stop,
     cmd_deep,
     cmd_diagnose,
+    cmd_explain,
     cmd_generate_config,
     cmd_generate_launchd,
     cmd_generate_systemd,
@@ -45,6 +46,14 @@ from .daemon import (
     write_daemon_state,
 )
 from .diagnostics import Diagnosis, Finding, format_report, run_diagnostics
+from .errors import (
+    ClassifyResult,
+    ErrorKind,
+    classify_http,
+    classify_opencode_log_line,
+    classify_transport,
+    explain_kind,
+)
 from .headers import HeaderInjector
 from .logs import HumanFormatter, JSONFormatter, level_from_args, setup_logging
 from .meta import __version__
@@ -80,6 +89,7 @@ __all__ = [
     "AccountHealth",
     "AccountPool",
     "AccountPoolConfig",
+    "ClassifyResult",
     "CleanupConfig",
     "CleanupManager",
     "CleanupResult",
@@ -88,6 +98,7 @@ __all__ = [
     "DaemonLockError",
     "DaemonStatus",
     "Diagnosis",
+    "ErrorKind",
     "Finding",
     "HeaderInjector",
     "HeadersConfig",
@@ -100,6 +111,9 @@ __all__ = [
     "__version__",
     "build_auth_payload",
     "build_parser",
+    "classify_http",
+    "classify_opencode_log_line",
+    "classify_transport",
     "clear_opencode_version_cache",
     "cmd_check",
     "cmd_completions",
@@ -107,6 +121,7 @@ __all__ = [
     "cmd_daemon_stop",
     "cmd_deep",
     "cmd_diagnose",
+    "cmd_explain",
     "cmd_generate_config",
     "cmd_generate_launchd",
     "cmd_generate_systemd",
@@ -116,6 +131,7 @@ __all__ = [
     "cmd_quick",
     "cmd_rotate",
     "credential_fingerprint",
+    "explain_kind",
     "extract_access_token",
     "extract_credential",
     "format_report",

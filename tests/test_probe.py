@@ -246,6 +246,59 @@ class TestModelProber:
         assert result.http_status == 400
         assert result.error_type == "MissingSessionID"
 
+    @pytest.mark.asyncio
+    async def test_probe_non_429_rate_message_is_limited(self, httpx_mock):
+        httpx_mock.add_response(
+            url=ModelProber.ZEN_ENDPOINT,
+            status_code=400,
+            json={"error": {"message": "Rate limit exceeded. Please try again later."}},
+        )
+        result = await ModelProber(10.0).probe("model", {})
+        assert result.status == "rate_limited"
+        assert result.error_kind == "rate_limited"
+        assert result.error_type == "RateLimitUnknown"
+
+    @pytest.mark.asyncio
+    async def test_probe_encrypted_content_is_reasoning_replay(self, httpx_mock):
+        httpx_mock.add_response(
+            url=ModelProber.ZEN_ENDPOINT,
+            status_code=400,
+            json={
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "Upstream request failed: reasoning `encrypted_content`"
+                    " was not issued to this caller",
+                }
+            },
+        )
+        result = await ModelProber(10.0).probe("model", {})
+        assert result.status == "error"
+        assert result.error_kind == "reasoning_replay"
+        assert result.error_type == "invalid_request_error"
+        assert result.error is not None and "encrypted_content" in result.error
+
+    @pytest.mark.asyncio
+    async def test_probe_socket_closed_is_transient_and_retried(self, httpx_mock):
+        from opencode_rate_limiter import ProberConfig
+
+        httpx_mock.add_exception(
+            Exception(
+                "Cannot connect to API: The socket connection was closed unexpectedly."
+            )
+        )
+        httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
+        prober = ModelProber(10.0, ProberConfig(max_retries=1))
+        result = await prober.probe("model", {})
+        assert result.status == "available"
+        assert len(httpx_mock.get_requests()) == 2
+
+    def test_is_transient_socket_closed_substring(self):
+        from opencode_rate_limiter import ProbeResult
+        from opencode_rate_limiter.prober import _is_transient_error
+
+        r = ProbeResult(model="m", status="error", error="boom: socket connection was closed")
+        assert _is_transient_error(r) is True
+
 
 class TestProberSessionConfig:
     def test_session_id_blank_rejected(self):
@@ -673,6 +726,17 @@ class TestMarkResultAttribution:
         pool = self._pool()
         pool.mark_result("a", success=True, latency_ms=10)
         assert pool.health["a"].success_count == 1
+
+    def test_non_credential_kinds_not_attributed(self):
+        pool = self._pool()
+        pool.mark_result("a", success=False, error_type="TransientTransport")
+        pool.mark_result(
+            "a", success=False, error_type="invalid_request_error", error_kind="reasoning_replay"
+        )
+        pool.mark_result("a", success=False, error_type="UpstreamError", error_kind="upstream")
+        h = pool.health["a"]
+        assert h.total_count == 0
+        assert h.consecutive_failures == 0
 
 
 class TestModelPlaceholder:

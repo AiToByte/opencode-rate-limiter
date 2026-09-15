@@ -9,6 +9,7 @@ Register-ArgumentCompleter -Native -CommandName @('opencode-rate-limiter') -Scri
         "daemon"
         "deep"
         "diagnose"
+        "explain"
         "generate-config"
         "generate-launchd"
         "generate-systemd"
@@ -41,7 +42,8 @@ Register-ArgumentCompleter -Native -CommandName @('opencode-rate-limiter') -Scri
     $candidates = switch ($sub) {
         "check" { @("--trend" "--export-events" "--export-format") }
         "daemon" { @("--interval" "--models" "--once" "--stop") }
-        "diagnose" { @("--model") }
+        "diagnose" { @("--model" "--from-text" "--from-log") }
+        "explain" { @("--from-log") }
         "generate-config" { @("--force") }
         "headers" { @("--model" "--export") }
         "rotate" { @("--strategy" "--to" "--apply") }

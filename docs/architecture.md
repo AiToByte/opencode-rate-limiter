@@ -46,8 +46,9 @@
               ▼                ▼                     ▼
       ┌──────────────────────────────────────────────────────┐
       │ 服务层                                                │
-      │  prober.py    ModelProber / ProbeResult（跨周期长连接） │
-      │  pool.py      AccountPool / AccountHealth（滑动窗口）  │
+       │  prober.py    ModelProber / ProbeResult（跨周期长连接） │
+       │  errors.py    统一错误分类（7 种 ErrorKind，同源复用）│
+       │  pool.py      AccountPool / AccountHealth（滑动窗口）  │
       │  cleanup.py   CleanupManager（auth 备份/缓存维护）     │
       │  diagnostics  run_diagnostics / Finding（诊断报告）    │
       │  render.py    check/probe 人读渲染（cli 兼容重导出）   │
@@ -71,7 +72,8 @@
 | `paths` | OpenCode 候选目录、auth/cache/state 候选路径、`opencode --version` 探测 | platformdirs |
 | `config` | 五段配置（daemon/account_pool/prober/headers/cleanup）的加载、合并、校验 | tomllib / tomli-w / platformdirs / paths |
 | `headers` | 官方 CLI 兼容头模板（`{version}` 占位、可选 Bearer token） | config |
-| `prober` | 异步探测：共享 AsyncClient、状态判定、`error.type` 解析、UTC 午夜估算 | httpx / config |
+| `prober` | 异步探测：共享 AsyncClient、双通道状态判定（状态码优先+文案回退）、`error.type`/`message` 解析、`error_kind` 分类、UTC 午夜估算 | httpx / config / errors |
+| `errors` | 无依赖纯函数分类层：`classify_http` / `classify_transport` / `classify_opencode_log_line` + `explain_kind` 文案；`prober`/`diagnostics`/`explain` 三方同源 | 标准库 |
 | `pool` | 账号池：auth 解析（真实 opencode 结构）、三策略轮换、滑动窗口健康度 | config |
 | `cleanup` | auth 备份、缓存目录维护 | paths / config |
 | `logs` | JSON Lines（真 UTC）与人读日志、Windows GBK 编码防护 | 标准库 |
@@ -80,7 +82,8 @@
 | `service` | systemd / launchd / Windows 任务计划文件模板 | platformdirs |
 | `parser` | argparse 树、结构化命令（banner 抑制）清单 | meta |
 | `completions` | 从**真实 parser** 派生 bash/zsh/fish/powershell 补全 | parser / config |
-| `diagnostics` | 出口 IP / 代理环境 / 429 分层诊断报告 | httpx / prober / paths / pool |
+| `diagnostics` | 出口 IP / 代理环境 / 统一分类诊断报告（含 reasoning-replay / transient / upstream 分支） | httpx / prober / errors / paths / pool |
+| `cli explain` | 离线分类前端：零配额解释粘贴的 opencode 报错（`--from-log` 批量） | errors |
 
 ## 3. 核心数据流
 
@@ -92,8 +95,10 @@ main()
   → setup_logging(level, json)         # stderr；JSON 行或人读；win32 reconfigure(errors=replace)
   → Config.load(args.config)           # CLI > $OPENCODE_RATE_LIMITER_CONFIG > 平台目录 > 默认
   → COMMAND_HANDLERS[command]()        # 异步处理器，asyncio.run 驱动
-       ├─ probe      → HeaderInjector → ModelProber.probe_all（按账号注入 Authorization）
-       ├─ diagnose   → 出口 IP/代理/auth 盘点 + 单次探测 + findings 报告
+        ├─ probe      → HeaderInjector → ModelProber.probe_all（按账号注入 Authorization）
+        ├─ diagnose   → 出口 IP/代理/auth 盘点 + 单次探测 + findings 报告
+        │                （或 --from-text/--from-log 离线分类，零配额）
+        ├─ explain    → errors.classify_opencode_log_line（离线，零配额）
        └─ quick/deep → CleanupManager.full_cleanup（备份 auth [→ 清缓存]）
 ```
 
@@ -144,13 +149,13 @@ run_diagnostics()
 | 清理功能 | 删锁/删 state/token 手术 | **诚实化：纯备份 + 缓存维护**。源码核实目标文件不存在，删除虚构文件是伪功能且有害（token 手术会登出用户） |
 | 账号池价值 | 宣称免费场景轮换 | **限定付费 key / BYOK 维度**。C4：免费配额键是 IP；文档与诊断均明示 |
 | 单实例锁（初版） | 无 / 文件锁库 | O_EXCL 锁文件 + 自研存活检测（v0.4.1 起被哨兵 OS 文件锁取代，见下） |
-| 诊断能力 | 只看 HTTP 状态码 | **解析响应体 `error.type`** 分层定位（IP 配额 / key RPM / 上游错误 / 鉴权），配合出口 IP 核实——直接回答"换节点/换账号为什么没用" |
+| 诊断能力 | 只看 HTTP 状态码 | **统一分类 + 解析响应体 `error.type`/`message`** 分层定位（IP 配额 / key RPM / 会话污染 / 瞬断 / 上游错误 / 鉴权），配合出口 IP 核实 |
 | 补全生成 | 手写脚本 | **从真实 argparse parser 派生**，命令/选项/模型列表单一数据源，永不漂移 |
 | 探测连接 | 每轮新建 AsyncClient | **daemon 常驻长连接**（SIGHUP 按配置变更转移/关闭），跨周期 keep-alive；`--once`/CLI 仍用批作用域连接 |
 | daemon 规模 | 800+ 行单文件 | **拆为 `_lock`/`_state`/`_runner` 包**，`daemon/__init__` 全量再导出，调用方与测试 patch 点保持兼容 |
 | 429 后轮换 | 记失败时再 `get_next` 一次 | **惰性轮换**：归因用 `last_served`，下一轮自然取新账号；round-robin 游标每轮只消费一次 |
 | 单实例锁 | O_EXCL + pid 存活检测 | **哨兵文件 OS 文件锁**（进程死亡 OS 自动释放=永不 stale）+ pid 文件信息展示；Windows 字节锁要求哨兵与 pid 分离 |
-| 重试 | 无（daemon 层承担） | **`[prober].max_retries` 仅瞬时网络错**，HTTP 状态（含 429）永不重试——429 走冷却，烧配额的重试是 bug |
+| 重试 | 无（daemon 层承担） | **`[prober].max_retries` 仅瞬时网络错**（含 socket closed / ECONNRESET 子串），HTTP 状态（含 429）永不重试 |
 
 ## 5. 状态与持久化
 
@@ -183,7 +188,7 @@ run_diagnostics()
 
 ## 8. 测试架构
 
-- **布局**：`tests/` 按主题分文件（core/probe/daemon/completions/build_binary/diagnostics），conftest 提供三类 TOML fixture。
+- **布局**：`tests/` 按主题分文件（core/probe/errors/explain/daemon/completions/build_binary/diagnostics），conftest 提供三类 TOML fixture。
 - **隔离约定**：网络 → `pytest-httpx`（注意其响应单次消费语义，周期性探测用 fake probe）；文件系统 → tmp_path + monkeypatch；monkeypatch 目标 = **使用方模块**（如 `opencode_rate_limiter.cli.get_opencode_version`）。
 - **质量门**：mypy strict（27 个源文件）、ruff（100 列规则集）、pytest（asyncio auto 模式），CI 矩阵 3 平台 × Python 3.11–3.13 + 二进制构建。
 - **计时类测试**：并发性验证用放大 sleep（0.2s）+ 宽松上界（0.35s），容忍 CI 抖动但仍能区分串行/并行。

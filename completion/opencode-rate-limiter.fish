@@ -6,6 +6,7 @@ function __fish_opencode_rate_limiter_commands
         daemon
         deep
         diagnose
+        explain
         generate-config
         generate-launchd
         generate-systemd
@@ -58,6 +59,10 @@ complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from daemon" \
     -l stop
 complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from diagnose" \
     -l model
+    -l from-text
+    -l from-log
+complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from explain" \
+    -l from-log
 complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from generate-config" \
     -l force
 complete -c opencode-rate-limiter -f -n "__fish_seen_subcommand_from headers" \

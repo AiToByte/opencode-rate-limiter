@@ -463,6 +463,9 @@ class RateLimiterDaemon:
                 )
             # Feed results back into health tracking; rate_limited is marked as
             # a failure inside _handle_rate_limited (which also rotates).
+            # Transient / reasoning-replay / upstream failures are NOT
+            # credential failures (pool.mark_result skips them); they only
+            # feed the backoff counter and audit events below.
             if r.status != "rate_limited":
                 name = account_by_model.get(r.model)
                 if name and self.pool is not None:
@@ -471,7 +474,19 @@ class RateLimiterDaemon:
                         success=r.status == "available",
                         latency_ms=r.latency_ms,
                         error_type=r.error_type,
+                        error_kind=r.error_kind,
                     )
+            kind = r.error_kind or ""
+            if r.status == "error" and kind == "transient_transport":
+                self._record_event("transient_skipped", model=r.model, error=r.error or "")
+            elif r.status == "error" and kind == "reasoning_replay":
+                self._record_event("reasoning_replay", model=r.model, error=r.error or "")
+                self.log.warning(
+                    "Reasoning-replay failure (poisoned session, not a limit)",
+                    extra={"model": r.model, "error": r.error or ""},
+                )
+            elif r.status == "error" and kind == "upstream":
+                self._record_event("upstream_error", model=r.model, error=r.error or "")
 
         limited = [r for r in results if r.status == "rate_limited"]
         for r in limited:
@@ -495,9 +510,10 @@ class RateLimiterDaemon:
                 if wait:
                     self._cooldowns[r.model] = time.monotonic() + wait
                     self._record_event("cooldown_armed", model=r.model, seconds=wait)
-        # Clear cooldowns for models that probed fine
+        # Clear cooldowns only for models that probed fine: a transient or
+        # upstream error must not lift a valid rate-limit cooldown.
         for r in results:
-            if r.status != "rate_limited":
+            if r.status == "available":
                 self._cooldowns.pop(r.model, None)
 
         # Backoff: every probe in the cycle errored (network/endpoint trouble)

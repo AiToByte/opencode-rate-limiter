@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .config import Config
+from .errors import ErrorKind, classify_http
 from .headers import HeaderInjector
 from .paths import get_opencode_auth_files, get_opencode_version
 from .pool import credential_fingerprint, extract_credential
@@ -269,12 +270,73 @@ _ERROR_TYPE_EXPLANATIONS: dict[str, tuple[str, str]] = {
     "AuthError": ("鉴权失败", "API key 缺失或无效；免费模型本可匿名访问，请检查凭证配置。"),
     "RegionError": ("地区限制", "当前出口 IP 所在地区被该模型限制，更换节点地区可能解决。"),
     "GoUsageLimitError": ("Go 订阅窗口限额（5 小时/周/月）", "属于订阅计费层限制。"),
+    "RateLimitUnknown": (
+        "被限流（具体层级未知）",
+        "网关返回了限额文案但未给出可识别的 error.type。先按免费 IP 日配额处理"
+        "（UTC 午夜重置）；若你在使用付费 key，也可能是 key RPM（约 1 分钟恢复）。"
+        "用原文 error 信息对照判断，或稍后重试看是否快速恢复。",
+    ),
+    "ReasoningReplayError": (
+        "推理加密块会话污染（非限额）",
+        "Anthropic 系 reasoning.encrypted_content 绑定签发时的凭证/模型/区域，"
+        "只能原样回放。中途换 key/换账号/换模型、--continue 老会话、"
+        "网关上游换 key/跨区路由都会报 400，且之后每轮都失败，直到清理历史。",
+    ),
+    "UpstreamError": (
+        "网关/上游错误",
+        "Zen 网关或其上游 provider 返回错误（与配额无关）。稍后重试、更换模型，"
+        "或查看 OpenCode 状态页。",
+    ),
+    "TransientTransport": (
+        "传输层瞬时中断（未到达网关限流层）",
+        "opencode 与网关/代理之间的长连接被掐断（网关负载、代理不稳、"
+        "context 过大导致 stream 超时都可能触发）。这不是限额，但限额前后"
+        "高并发时更常见；响应不是 Zen 错误格式，通常是网络/代理链路问题。",
+    ),
     "server_error": (
         "网关/上游错误",
         "Zen 网关或其上游 provider 返回错误（与配额无关）。稍后重试、更换模型，"
         "或查看 OpenCode 状态页。",
     ),
 }
+
+
+def _result_kind(result: ProbeResult) -> ErrorKind:
+    """Unified kind for a probe result: stored `error_kind` wins, else classify."""
+    raw = (result.error_kind or "").strip()
+    if raw in (
+        "rate_limited",
+        "transient_transport",
+        "reasoning_replay",
+        "upstream",
+        "auth",
+        "server",
+        "unknown",
+    ):
+        return raw  # type: ignore[return-value]
+    return classify_http(result.http_status, result.error_type, result.error).kind
+
+
+def _proxy_hint_findings() -> list[Finding]:
+    proxy = collect_proxy_env()
+    if any(proxy.values()):
+        return [
+            Finding(
+                "warn",
+                "检测到代理环境变量",
+                f"{', '.join(k for k, v in proxy.items() if v)} 已设置。"
+                "代理不可达或节点断连会导致探测直接失败。",
+                remedy="确认本地代理端口（如 7897）正在监听且节点可用。",
+            )
+        ]
+    return [
+        Finding(
+            "info",
+            "未检测到代理环境变量",
+            "若你依赖 Clash 等代理访问 opencode.ai：终端 CLI 不读系统代理，"
+            "需要设置 HTTPS_PROXY 或开启 TUN 模式，否则流量直连。",
+        )
+    ]
 
 
 def _probe_findings(result: ProbeResult, model: str) -> tuple[list[Finding], str, int]:
@@ -293,11 +355,15 @@ def _probe_findings(result: ProbeResult, model: str) -> tuple[list[Finding], str
     if result.status == "rate_limited":
         error_type = result.error_type or "unknown"
         expl = _ERROR_TYPE_EXPLANATIONS.get(error_type)
+        if expl is None and _result_kind(result) == "rate_limited":
+            expl = _ERROR_TYPE_EXPLANATIONS["RateLimitUnknown"]
+            error_type = error_type if error_type != "unknown" else "RateLimitUnknown"
         title = expl[0] if expl else f"被限流（{error_type}）"
         detail = expl[1] if expl else "网关返回 429，具体层级未知。"
-        findings.append(
-            Finding("fail", title, detail + f"\n模型: {model}，error.type: {error_type}")
-        )
+        suffix = f"\n模型: {model}，error.type: {error_type}"
+        if result.error:
+            suffix += f"\n网关原文: {result.error[:200]}"
+        findings.append(Finding("fail", title, detail + suffix))
         if error_type == "FreeUsageLimitError":
             seconds, human = _reset_time_strings()
             wait = result.retry_after if result.retry_after else seconds
@@ -329,15 +395,87 @@ def _probe_findings(result: ProbeResult, model: str) -> tuple[list[Finding], str
                 )
             )
         else:
+            seconds, human = _reset_time_strings()
+            wait = result.retry_after if result.retry_after else seconds
             findings.append(
                 Finding(
                     "info",
-                    "该限制与出口 IP 无关",
-                    "账号/key 维度的限额换 IP 或换账号（同凭证）都不会更快恢复。",
-                    remedy="等待窗口重置或调整付费计划。",
+                    "配额重置时间参考",
+                    f"retry-after = {wait}s；免费 IP 配额在 UTC 午夜重置：{human}。"
+                    "若为 key RPM 则约 1 分钟恢复，可稍后重试观察恢复速度辅助判断。",
                 )
             )
+            if error_type in ("RateLimitError",):
+                findings.append(
+                    Finding(
+                        "info",
+                        "该限制与出口 IP 无关",
+                        "账号/key 维度的限额换 IP 或换账号（同凭证）都不会更快恢复。",
+                        remedy="等待窗口重置或调整付费计划。",
+                    )
+                )
+            else:
+                findings.append(
+                    Finding(
+                        "warn",
+                        "先按 IP 配额处理，同时排除 key 维度",
+                        "error.type 未明确层级：优先按免费 IP 日配额等待/换出口 IP；"
+                        "若你在用付费 key 且约 1 分钟后恢复，则是 key RPM，无需换 IP。",
+                        remedy="等待重置；换不同地区/服务商出口 IP 验证；"
+                        "付费 key 场景可对照 key 冷却观察。",
+                    )
+                )
         return findings, "rate_limited", 1
+
+    kind = _result_kind(result)
+    if kind == "reasoning_replay":
+        title, detail = _ERROR_TYPE_EXPLANATIONS["ReasoningReplayError"]
+        err_type = result.error_type or "invalid_request_error"
+        findings.append(
+            Finding(
+                "fail",
+                title,
+                f"HTTP {result.http_status}，error.type: {err_type}"
+                f"\n模型: {model}\n网关原文: {(result.error or '')[:300]}\n{detail}",
+                remedy="当前会话 /clear 或开新会话（勿 --continue）；"
+                "同会话内不换模型不换账号。",
+            )
+        )
+        findings.append(
+            Finding(
+                "warn",
+                "切勿轮换账号抢救",
+                "该失败与配额无关，轮换账号/换 key 会让新凭证也沾上旧加密块，"
+                "加重污染。本工具对此类错误不做自动轮换与 key 冷却。",
+            )
+        )
+        return findings, "error", 2
+
+    if kind == "transient_transport":
+        title, detail = _ERROR_TYPE_EXPLANATIONS["TransientTransport"]
+        findings.append(
+            Finding(
+                "fail",
+                title,
+                f"错误: {result.error or 'unknown'}\n{detail}",
+                remedy="重试一次；大 context 先 /compact；确认代理/TUN 生效后开新会话验证。",
+            )
+        )
+        findings.extend(_proxy_hint_findings())
+        return findings, "error", 2
+
+    if kind == "upstream":
+        title, detail = _ERROR_TYPE_EXPLANATIONS["UpstreamError"]
+        findings.append(
+            Finding(
+                "fail",
+                title,
+                f"HTTP {result.http_status}，error.type: {result.error_type or 'UpstreamError'}"
+                f"\n网关原文: {(result.error or '')[:300]}\n{detail}",
+                remedy="稍后重试或更换模型；若持续出现，检查 OpenCode 状态页。",
+            )
+        )
+        return findings, "error", 2
 
     # status == "error"
     if result.error_type is not None:
@@ -363,26 +501,7 @@ def _probe_findings(result: ProbeResult, model: str) -> tuple[list[Finding], str
             f"错误: {result.error or 'unknown'}。响应不是 Zen 错误格式，通常是网络/代理链路问题。",
         )
     )
-    proxy = collect_proxy_env()
-    if any(proxy.values()):
-        findings.append(
-            Finding(
-                "warn",
-                "检测到代理环境变量",
-                f"{', '.join(k for k, v in proxy.items() if v)} 已设置。"
-                "代理不可达或节点断连会导致探测直接失败。",
-                remedy="确认本地代理端口（如 7897）正在监听且节点可用。",
-            )
-        )
-    else:
-        findings.append(
-            Finding(
-                "info",
-                "未检测到代理环境变量",
-                "若你依赖 Clash 等代理访问 opencode.ai：终端 CLI 不读系统代理，"
-                "需要设置 HTTPS_PROXY 或开启 TUN 模式，否则流量直连。",
-            )
-        )
+    findings.extend(_proxy_hint_findings())
     return findings, "error", 2
 
 
@@ -588,6 +707,8 @@ def format_report(diagnosis: Diagnosis) -> str:
     )
     if probe.get("error_type"):
         lines.append(f"  error.type: {probe['error_type']}")
+    if probe.get("error_kind"):
+        lines.append(f"  error.kind: {probe['error_kind']}")
     if probe.get("error"):
         lines.append(f"  错误信息: {probe['error']}")
     if probe.get("retry_after"):

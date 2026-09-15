@@ -240,16 +240,40 @@ class AccountPool:
         success: bool,
         latency_ms: float = 0.0,
         error_type: str | None = None,
+        error_kind: str | None = None,
     ) -> None:
         """Record probe result for health tracking
 
         Attribution rules: a ``FreeUsageLimitError`` is an IP-level failure and
         is NOT counted against the credential; a ``RateLimitError`` counts as a
-        key-dimension failure (``key_limited_count``).
+        key-dimension failure (``key_limited_count``). Transient transport,
+        reasoning-replay (poisoned session) and upstream failures are also NOT
+        credential failures — rotating on them makes things worse.
         """
 
         h = self.health.get(name)
         if not h:
+            return
+
+        # IP-level limits and non-credential failures never pollute health.
+        # error_kind (when present) is authoritative; error_type covers older
+        # callers and normalized prober types.
+        skip_types = frozenset(
+            {
+                "FreeUsageLimitError",
+                "ReasoningReplayError",
+                "UpstreamError",
+                "TransientTransport",
+            }
+        )
+        skip_kinds = frozenset({"transient_transport", "reasoning_replay", "upstream"})
+        if not success and (error_type in skip_types or (error_kind or "") in skip_kinds):
+            self.log.debug(
+                "Skipping health mark for %s: %s/%s is not a credential failure",
+                name,
+                error_kind or "-",
+                error_type or "-",
+            )
             return
 
         if not success and error_type == "FreeUsageLimitError":

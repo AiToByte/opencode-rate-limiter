@@ -281,9 +281,9 @@ opencode-rate-limiter --version
 说明：
 - `--json`、`--dry-run`、`--log-file`、`--json-verbose` 通过共享父 parser（`common`）
   注入所有子命令，因此写在子命令前后都有效（未显式给出时保持父层值——`SUPPRESS` 默认值技巧）。
-- 结构化输出命令（`check`、`probe`、`headers`、`generate-systemd`、`generate-launchd`、
-  `generate-task`、`completions`）**不打印启动横幅**；其余命令（`quick`、`deep`、`rotate`、
-  `daemon`）打印横幅，除非指定 `--json`。
+- 结构化输出命令（`check`、`probe`、`diagnose`、`explain`、`headers`、`generate-systemd`、
+  `generate-launchd`、`generate-task`、`completions`）**不打印启动横幅**；其余命令（`quick`、
+  `deep`、`rotate`、`daemon`）打印横幅，除非指定 `--json`。
 - 从属参数：`probe` 的 `--model`… 见各命令。
 
 ### 4.2 `quick` —— 快速维护（auth 备份）
@@ -471,12 +471,13 @@ opencode-rate-limiter check --export-events FILE [--export-format jsonl|csv]
 ### 4.8 `diagnose` —— Zen 限额诊断
 
 ```
-opencode-rate-limiter diagnose [--model MODEL] [--json]
+opencode-rate-limiter diagnose [--model MODEL] [--from-text TEXT] [--from-log FILE] [--json]
 ```
 
 一次诊断 = 环境检出 + 出口 IP 核实 + **单次探测**（仅消耗 1 次每日配额）+
-429 错误层级判定 + 分项发现与建议。产物为人读报告；`--json` 输出完整结构
-（`findings[]` 含 severity/title/detail/remedy）。
+错误统一分类（`errors.py`：429 状态码优先、响应体 `error.type`/`message` 回退）+
+分项发现与建议。产物为人读报告；`--json` 输出完整结构
+（`findings[]` 含 severity/title/detail/remedy，`probe` 含 `error_kind`）。
 
 诊断覆盖与判定：
 
@@ -484,9 +485,10 @@ opencode-rate-limiter diagnose [--model MODEL] [--json]
 |--------|----------|
 | 出口 IP | 经 `HTTP(S)_PROXY` 实测出口（多个回显服务回退、`ipaddress` 校验），IPv6 给出 /64 前缀并提示聚合规则 |
 | 代理环境 | `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY`；提醒终端 CLI 不读系统代理、NO_PROXY 可能绕过代理 |
-| 429 分层 | 解析响应体 `error.type`：`FreeUsageLimitError`（IP 日配额→附 UTC 午夜重置时刻、「换账号无效」说明）/ `RateLimitError`（key RPM）/ `server_error`（上游错误）/ `AuthError`、`RegionError` 等，各配专属解释与建议 |
+| 429 分层 | 解析响应体 `error.type` + `message`：`FreeUsageLimitError`（IP 日配额→附 UTC 午夜重置时刻、「换账号无效」说明）/ `RateLimitError`（key RPM）/ 非 429 但文案命中限额（如 `Rate limit exceeded`）同样判限流（`RateLimitUnknown`）/ `server_error`、`UpstreamError`（上游错误）/ `ReasoningReplayError`（`encrypted_content` 会话污染→提示 `/clear`、切勿轮换账号）/ `AuthError`、`RegionError` 等，各配专属解释与建议 |
 | 凭证盘点 | 各 auth.json 候选的存在性/结构（single-entry / provider-keyed）/ 是否含凭证——**绝不输出凭证内容** |
-| 网络 | 探测未达网关（超时/拒连）时给出代理链路排查建议 |
+| 网络 | 探测未达网关时先按统一分类区分：传输层瞬时中断（socket closed / ECONNRESET 等，标题含“未到达网关限流层”）给出代理链路与 `/compact` 建议；未知错误给 verbose 复现指引 |
+| 离线模式 | `--from-text TEXT` / `--from-log FILE`：零配额离线分类粘贴的报错文本，不发任何探测；verdict/exit 沿在线语义（限流 1 / 错误 2 / 未知 0） |
 
 退出码：`0` 健康；`1` 被限流；`2` 网络/网关错误（未达限流层）。
 
@@ -506,6 +508,30 @@ opencode-rate-limiter diagnose [--model MODEL] [--json]
          → 建议: 换不同地区/不同服务商的出口 IP，或等待重置。
 -- 结论: 被限流 --
 ```
+
+### 4.8.1 `explain` —— 离线报错解释（零配额）
+
+```
+opencode-rate-limiter explain "<报错文本>" [--json]
+opencode-rate-limiter explain --from-log PATH [--json]
+```
+
+统一分类器（`errors.py`，与 `probe`/`diagnose` 同源，大小写不敏感子串匹配）的
+离线前端：把 opencode TUI 或日志里的一条报错粘贴进来，直接给出
+`kind`（`rate_limited` / `transient_transport` / `reasoning_replay` /
+`upstream` / `auth` / `server` / `unknown`）+ 中文标题/详情/建议。
+不读配置、不发网络请求，达到限额时也可放心使用。
+
+典型三类：
+
+| 粘贴的报错 | `kind` | 处置 |
+|------------|--------|------|
+| `Cannot connect to API: The socket connection was closed unexpectedly…` | `transient_transport` | 重试；查代理/TUN；大 context 先 `/compact` |
+| `Error from provider (Console): Rate limit exceeded…` | `rate_limited` | 等 UTC 午夜或换出口 IP（换账号无效） |
+| `…reasoning encrypted_content was not issued to this caller` | `reasoning_replay` | 当前会话 `/clear` 或开新会话（勿 `--continue`），切勿轮换账号 |
+
+退出码：`1` 命中限流；`2` 命中错误类；`0` 未知/无命中。`--from-log` 逐行分类
+（最多 50 行、1MB 上限），`--json` 下多行输出 `{results[], summary{kind: count}}`。
 
 ### 4.9 `daemon` —— 后台守护进程
 
@@ -977,8 +1003,8 @@ python scripts/build_binary.py
 | 退出码 | 场景 |
 |--------|------|
 | 0 | 成功；`--help` / `--version` |
-| 1 | `quick`/`deep` 清理存在错误；`probe` 有任意模型被限流；`rotate` 无账号；daemon 已有存活实例（单实例锁）；`generate-config` 目标已存在（无 `--force`）或写入失败；命令处理器抛未捕获异常 |
-| 2 | 配置加载失败（文件缺失/TOML 语法错误等）；无效子命令或缺失必需参数（argparse）；`daemon --interval < 5`；`daemon --models` 解析为空 |
+| 1 | `quick`/`deep` 清理存在错误；`probe` 有任意模型被限流；`explain` / `diagnose --from-*` 离线命中限额；`rotate` 无账号；daemon 已有存活实例（单实例锁）；`generate-config` 目标已存在（无 `--force`）或写入失败；命令处理器抛未捕获异常 |
+| 2 | 配置加载失败（文件缺失/TOML 语法错误等）；无效子命令或缺失必需参数（argparse）；`daemon --interval < 5`；`daemon --models` 解析为空；`explain` 离线命中错误类（传输/会话污染/上游等）或无输入；`diagnose --from-*` 离线命中错误类 |
 | 130 | `asyncio.run` 阶段捕获 `KeyboardInterrupt`（含 `daemon` 在信号兜底不可用时的 Ctrl+C） |
 
 > 说明：子命令为 `argparse` 必选项，未传命令或传了未知命令都会由 argparse 以退出码 2
@@ -1008,6 +1034,9 @@ opencode-rate-limiter check --json | jq .
 | 版本号不符 | `opencode` 需在 PATH；版本检测失败会回退 `unknown`（头部模板插入 `unknown`）；可用 `OPENCODE_VERSION=xxx` 覆盖 |
 | 探测全 error(timeout) | 网络问题；配置 `[prober].proxy` 或标准 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量，或调大 `probe_timeout_seconds` |
 | 探测出现 429 | 服务端按 IP 计数的每日配额用尽（UTC 午夜重置）；`estimated_reset` 即冷却秒数；本地操作无法解除 |
+| 报错 socket closed unexpectedly | 传输层瞬时中断（非限额）：重试一次；确认代理/TUN；大 context 先 `/compact`；`explain "<原文>"` 零配额确认 |
+| 报错 Rate limit exceeded | 服务端限额：等 UTC 午夜或换出口 IP（换账号无效）；`explain` / `diagnose --from-text` 零配额确认 |
+| 报错 encrypted_content not issued | 推理加密块会话污染（非限额）：当前会话 `/clear` 或开新会话（勿 `--continue`），同会话不换模型不换账号，切勿轮换账号 |
 | 本地总提示限流 | 服务端冷却未结束，本地清理只解除本地挂起；等待 1–5 分钟 |
 | `rotate` 无账号 | `[account_pool]` 未配置或账号缺 `name`/认证来源；`check --json` 看 `configured_accounts` |
 | `check --json` 没有文件输出 | 结构化命令不打印横幅是正常行为，输出即为 JSON |

@@ -28,8 +28,9 @@
 
 | 功能 | 一句话 | 关键命令 |
 |------|--------|----------|
-| 模型探测 | 并发 ping 免费模型，判定可用/限流/错误并解析错误层级 | `probe` |
+| 模型探测 | 并发 ping 免费模型，判定可用/限流/错误并统一分类错误 | `probe` |
 | 限额诊断 | 出口 IP + 代理 + 错误分层 + 建议，一条命令定位"为什么被限" | `diagnose` |
+| 离线解释 | 粘贴报错文本即分类（零配额，不发探测） | `explain` |
 | 守护进程 | 保守节奏的自动探测 + 冷却 + 预算 + 退避 + 状态持久化 | `daemon` |
 | 健康检查 | 配置 × 运行时状态聚合输出 | `check` |
 | 账号池 | 多凭证轮换与健康管理（付费 key/BYOK 维度有效） | `rotate` |
@@ -52,16 +53,17 @@
 | HTTP | 结果 | 附加信息 |
 |------|------|----------|
 | 200 | `available` | 延迟 |
-| 429 | `rate_limited` | `retry_after`（真实头）与 `estimated_reset`（缺失时=距 UTC 午夜秒数）、`error_type` |
-| 其他 | `error` | `error_type`（若响应体是 Zen 错误格式，如 `server_error`）或网络错误文本 |
+| 429 | `rate_limited` | `retry_after`（真实头）与 `estimated_reset`（缺失时=距 UTC 午夜秒数）、`error_type`、`error_kind=rate_limited` |
+| 其他 | `error` 或 `rate_limited` | 统一分类（`errors.py`，状态码优先、文案回退）：非 429 但 message 命中限额文案（如 `Rate limit exceeded`）同样判限流（`RateLimitUnknown`）；`encrypted_content` 文案判 `reasoning_replay`（`ReasoningReplayError`）；`Upstream` 文案判 `upstream`；否则 `error_type`（如 `server_error`）或网络错误文本；结果带 `error_kind` |
 
 **特点**：
 - 并发执行（共享一个池化连接的 AsyncClient；daemon 中跨周期常驻）。
 - 每次探测携带 `x-opencode-session`（网关强制要求，缺失报 `MissingSessionID`；
   每个 prober 实例随机生成、生命周期内稳定，`[prober].session_id` 可显式覆盖）。
 - 超时三细分：`connect failed`（链路/代理）/ `connect timeout` / `read timeout`
-  （网关慢），排障方向不同；`[prober].max_retries` 只对这类瞬时错即时重试，
-  HTTP 状态（含 429）永不重试。
+  （网关慢），排障方向不同；`[prober].max_retries` 对瞬时错即时重试——除上述三类，
+  `socket closed unexpectedly` / `ECONNRESET` / `RemoteProtocolError` 等传输中断
+  同样可重试（`error_kind=transient_transport`），HTTP 状态（含 429）永不重试。
 - **单次 token 成本**：200 响应的 `usage` 记入结果，人读如 `(3203ms, 248+1 tok)`——
   网关对 ping 也计约 248 prompt token，探测并非零成本。但**总量未知**：网关不
   暴露配额计数器，"剩余额度"算不出来，只能判定是否撞线。
@@ -93,12 +95,32 @@
    - `FreeUsageLimitError` → IP 日配额用尽；给出 UTC 午夜重置的精确本地时刻；
      **"换账号对此无效"**；"确认出口 IP 与节点切换是否生效"核验清单
      （CLI 不读系统代理、共享机场节点可能已被耗尽、IPv6 /64 聚合）。
-   - `RateLimitError` → 付费 key RPM，等一分钟。
-   - `server_error` → 网关/上游错误，与配额无关。
-   - 请求未达网关（超时/拒连）→ 网络/代理链路排查建议。
+    - `RateLimitError` → 付费 key RPM，等一分钟。
+    - `RateLimitUnknown` → 非 429 但限额文案：先按 IP 日配额等待/换出口 IP，
+      若约 1 分钟恢复则是 key RPM。
+    - `server_error` / `UpstreamError` → 网关/上游错误，与配额无关。
+    - `ReasoningReplayError`（`encrypted_content was not issued…`）→ 推理加密块
+      会话污染：当前会话 `/clear` 或开新会话（勿 `--continue`），同会话不换
+      模型不换账号，**切勿轮换账号**。
+    - `TransientTransport`（socket closed / ECONNRESET 等）→ 传输层瞬时中断：
+      重试、确认代理/TUN、大 context 先 `/compact`。
+    - 请求未达网关（超时/拒连）→ 网络/代理链路排查建议。
 
 **健壮性**：所有外部调用带超时、逐级降级为 warn finding；任何异常都不会让诊断崩溃；
 退出码 0/1/2 = 健康/被限流/网络错误，可脚本化。
+
+**离线模式**：`diagnose --from-text TEXT` / `--from-log FILE` 走与 `explain`
+相同的零配额分类，不发探测（限额耗尽时用它）。
+
+## 3.1 离线解释（`explain`）
+
+**解决什么**：达到限额、最不想再花配额的时候，把 opencode TUI 里的一条报错
+粘贴进来就知道是哪类问题、该怎么做。不读配置、不发网络请求。
+
+- `explain "<报错文本>"` / `explain --from-log FILE`（多行逐行分类，最多 50 行）；
+  `--json` 单行输出对象、多行输出 `{results[], summary{kind: count}}`。
+- 分类器与 `probe`/`diagnose` 同源（`errors.py`），退出码沿在线语义：
+  限流 1 / 错误类 2 / 未知 0。
 
 ## 4. 守护进程（`daemon`）
 
@@ -163,9 +185,11 @@
   `check`/`rotate` 以**指纹**（前 6 后 4，如 `sk-abc…wxyz`）展示凭证，明文绝不输出。
 - **限流归因**（R1）：`RateLimitError`（key RPM）计入该账号的 key 维度失败计数
   （`key_limited_count`）并触发 key 冷却（`[daemon].key_cooldown_seconds`，默认
-  60s）——冷却中的账号不再注入凭证，
-  全部冷却时回退匿名头；`FreeUsageLimitError`（IP 配额）**不**计入凭证健康度，
-  因为那是 IP 的责任而非凭证的。
+   60s）——冷却中的账号不再注入凭证，
+   全部冷却时回退匿名头；`FreeUsageLimitError`（IP 配额）**不**计入凭证健康度，
+   因为那是 IP 的责任而非凭证的。同理，传输层瞬时中断（`TransientTransport`）、
+   推理加密块会话污染（`ReasoningReplayError`）与上游错误（`UpstreamError`）也
+   **不**计入健康度、不触发 key 冷却与轮换——对污染会话轮换账号只会加重污染。
 - `rotate --apply`：把选中账号的凭证**归一化**写入活动 auth.json（`build_auth_payload()`）：
   api key 写为 `{zen键: {type:api, key}}`，单条 oauth / bare 载荷包裹为 provider
   键控结构，完整快照原样透传；先备份 `.json.bak`；`--dry-run` 只预览目标。

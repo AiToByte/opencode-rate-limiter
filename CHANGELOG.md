@@ -7,6 +7,40 @@ All notable changes to opencode-rate-limiter will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **三类真实报错的统一分类与离线解释**：新增 `errors.py`
+  （`rate_limited` / `transient_transport` / `reasoning_replay` / `upstream` /
+  `auth` / `server` / `unknown`，状态码优先、文案回退、大小写不敏感），
+  `probe`/`diagnose`/`daemon`/`explain` 四方同源。
+- **`explain` 子命令（零配额）**：`explain "<报错文本>"` /
+  `explain --from-log FILE` 离线分类粘贴的 opencode 报错，不读配置、不发请求；
+  `diagnose --from-text/--from-log` 同样走离线路径。退出码沿在线语义
+  （限流 1 / 错误类 2 / 未知 0）。
+- **`diagnose` 新 findings**：`RateLimitUnknown`（非 429 但限额文案的回退）、
+  `ReasoningReplayError`（会话污染→`/clear`、切勿轮换账号）、
+  `TransientTransport`（socket closed 类瞬断→代理/`/compact` 指引）；
+  `probe` 报告新增 `error_kind` 字段（`format_report` 同步展示）。
+
+### Changed
+
+- **探测判定双通道**：非 429 但网关 message 命中限额文案同样判 `rate_limited`；
+  400 系 `encrypted_content`/`Upstream` 文案归一为带 `error_kind` 的 `error`，
+  不再吞掉原文（`error` 保留网关 message 截断 500 字）。
+- **瞬时重试扩展**：`socket closed unexpectedly` / `ECONNRESET` /
+  `RemoteProtocolError` 等经 `max_retries` 重试（429 永不重试约束不变）；
+  `ConnectError`/`TimeoutException` 结果带 `error_kind=transient_transport`。
+- **daemon/pool 归因分流**：transient / reasoning-replay / upstream
+  不计账号健康度、不布 key 冷却、不触发轮换（reasoning 事件记
+  `reasoning_replay` 并 warn 提示 `/clear`）；冷却仅 `available` 时解除，
+  瞬断不再冲掉有效的限额冷却；新增 `transient_skipped` / `upstream_error` 事件。
+
+### Fixed
+
+- 达到限额时的三类报错此前被统一归为普通 `error` 或误导性网络问题；
+  现分别给出可执行建议（等 UTC 午夜/换出口 IP；重试+查代理+`/compact`；
+  `/clear`+不换模型不换账号）。
+
 ## [0.6.2] - 2026-09-14
 
 ### Added

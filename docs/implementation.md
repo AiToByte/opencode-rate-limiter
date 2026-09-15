@@ -66,16 +66,27 @@ bool 目标接受 "true/1/yes"；int/float 目标直接 `int(new)`/`float(new)`�
 - 请求体 `{model, messages:[{role:user, content: ping_message}], max_tokens,
   temperature: 0}`；共享头 + `extra_headers` 合并（后者覆盖同名键）。
 - 延迟用 `time.monotonic()` 计（不受系统时钟跳变影响），时间戳为 UTC ISO-Z。
-- 判定：
+- 判定（双通道，状态码优先、文案回退）：
   - 200 → `available`
   - 429 → `rate_limited`，读 `Retry-After` 头（int 化失败→None），
-    `estimated_reset = _estimate_reset(retry_after)`
-  - 其他状态 → `error`（`error="HTTP xxx"`）
-  - `httpx.TimeoutException` → `error(timeout)`；其余异常 → `error(str(e))`
+    `estimated_reset = _estimate_reset(retry_after)`；`error` 取 body message
+    （若有），`error_kind="rate_limited"`
+  - 其他状态 → 经 `errors.classify_http(status, type, message)`：
+    限额文案（如 `Rate limit exceeded`）同样判 `rate_limited`
+    （`RateLimitUnknown`，带 `retry_after` 估算）；`encrypted_content` 文案判
+    `error` + `ReasoningReplayError`/`reasoning_replay`；`Upstream` 文案判
+    `upstream`；否则 `error`（`error` 优先取 body message，截断 500 字，
+    无 message 才回退 `error="HTTP xxx"`）
+  - `httpx.ConnectError/TimeoutException` → `error` + `error_kind="transient_transport"`；
+    其余异常经 `errors.classify_transport(str(e))` 定 kind（socket closed 类可重试）
 - 每个非 200 响应经 `_parse_error_type(resp)` 提取
-  `{error:{type}}` 体中的 `type` 字符串（JSON 解析与字段访问全程防御，
-  HTML/非 JSON 一律返回 None）。该值随 `ProbeResult.error_type` 上抛，
-  是诊断分层的关键输入。
+  `{error:{type}}` 体中的 `type` 字符串，并经 `_parse_error_message(resp)` 提取
+  `error.message` / `message` / `detail`（截断 500 字；JSON 解析与字段访问全程防御，
+  HTML/非 JSON 一律返回 None）。两者随 `ProbeResult` 上抛，是诊断分层的关键输入；
+  `to_dict()` 另带 `error_kind`。
+- `_is_transient_error`：`status==error` + `http_status is None` +
+  前缀命中（`connect failed/timeout`、`read timeout`）**或**
+  `errors.TRANSIENT_MARKERS` 子串命中（socket closed / ECONNRESET 等）。
 
 ### 2.3 重置点估算
 
@@ -140,13 +151,17 @@ bool 目标接受 "true/1/yes"；int/float 目标直接 `int(new)`/`float(new)`�
 3. **账号选择**：对每个 active 模型 `pool.get_next()`；`resolve_token` 成功则
    `headers_by_model[model] = injector.build_headers(token=...)`。
 4. `probe_all(active, headers, headers_by_model or None)`；`_probe_count += len(results)`。
-5. 结果回写：`model_results` 更新 + 日志；非 rate_limited 结果 `mark_result`。
+5. 结果回写：`model_results` 更新 + 日志；非 rate_limited 结果 `mark_result`
+   （带 `error_kind`；transient / reasoning-replay / upstream 由池内跳过，
+   不计健康度），并按 kind 记审计事件（`transient_skipped` /
+   `reasoning_replay` + warning / `upstream_error`）。
 6. 429 处理：逐个 `_handle_rate_limited(result, account_name)`——只做失败标记
    （归因对象是 `last_served`/传入的实际服务账号）+ `rotation` 事件（惰性轮换，
    下一轮自然取新账号，不 double 消费游标）；随后**每轮至多一次**
    `asyncio.to_thread(self.cleanup.full_cleanup)`。
 7. 冷却布防：对 rate_limited 模型 `cooldown = monotonic + (retry_after or
-   estimated_reset)`；探测正常（含 available/error）的模型解除冷却。
+   estimated_reset)`；仅 `available` 的模型解除冷却（transient/upstream 错误
+   不冲掉有效限额冷却）。
 8. 退避：全 error 连击 `_error_streak+=1` 否则清零；`_backoff_multiplier()` =
    `1 << min(streak, 3)`（上限 8×）。
 9. 快照与持久化：`pool_health`（用配置权重算 score）、`history.append({ts, models})`
@@ -224,7 +239,11 @@ remedy}` 列表并决定 `verdict/exit_code`：
 |----------|------|---------------|
 | available | ok / 0 | 延迟与配额健康提示 |
 | 429 + `FreeUsageLimitError` | rate_limited / 1 | 配额用尽（IP 键）→ 重置时刻（`seconds_to_utc_midnight` + 本地时区换算）→ "换账号无效" → 出口 IP/节点切换核验清单（CLI 不读系统代理、共享节点、/64） |
-| 429 + `RateLimitError` 等 | rate_limited / 1 | "该限制与出口 IP 无关"，等待窗口 |
+| 429 + `RateLimitError` | rate_limited / 1 | "该限制与出口 IP 无关"，等待窗口 |
+| rate_limited + 未知层级（`RateLimitUnknown`，含非 429 限额文案） | rate_limited / 1 | 重置时刻参考 + "先按 IP 配额处理，同时排除 key 维度"双轨建议；`error` 保留网关原文 |
+| error + `reasoning_replay` | error / 2 | 会话污染：`/clear`/新会话 remedy + "切勿轮换账号" warn；daemon 对此不轮换不冷却 |
+| error + `transient_transport` | error / 2 | 瞬断标题（含"未到达网关限流层"兼容断言）+ 代理 hint；daemon 只退避不冷却 |
+| error + `upstream` | error / 2 | 上游错误解释，稍后重试/换模型 |
 | error + `error_type` 非空 | error / 2 | **已到达网关**：按映射表解释（`server_error` → 上游错误，与配额无关） |
 | error 无 `error_type` | error / 2 | 未达网关：网络/代理链路排查（代理变量在→查端口与节点；不在→提醒 CLI 不读系统代理） |
 
@@ -236,15 +255,21 @@ remedy}` 列表并决定 `verdict/exit_code`：
 - **共享旗标技巧**：`--json`/`--dry-run` 通过公共父 parser 注入子命令，默认值用
   `argparse.SUPPRESS`——子命令未显式给出时不覆盖父层值，实现"写在前后都生效"。
 - **banner 抑制**：`should_print_banner()` 对 `_STRUCTURED_COMMANDS`
-  （check/diagnose/probe/headers/generate-*/completions）与一切 `--json` 输出隐藏
+  （check/diagnose/explain/probe/headers/generate-*/completions）与一切 `--json` 输出隐藏
   启动横幅，保证管道纯净。
 - **补全派生**：`_completion_payload()` 反射真实 parser——子命令取
   `help`/`description`，选项取 `option_strings`（排除全局旗标），`--strategy` 取
   choices，`probe` 位置参数取 `FREE_MODELS + ["all"]`。三个 shell 模板用 `%`-格式
   （`pyproject` 中 `UP031` 豁免有注释说明：大括号密集的 shell 模板用 f-string 会
   双花括号地狱）。**新增子命令只需注册 parser**，补全/测试清单同步即自动覆盖。
+- **统一分类层**（`errors.py`）：无依赖纯函数。`classify_http` 优先级
+  429 > reasoning > 限额文案 > upstream > auth > 5xx/server > transient > unknown；
+  429 恒判限流、未知文案恒不降级。`classify_transport` / `classify_opencode_log_line`
+  供异常串与粘贴文本复用；`explain_kind` 提供离线文案。
+  `_result_kind()`（diagnostics）以 `ProbeResult.error_kind` 为准、回退实时分类。
 - **退出码约定**：0 成功；1 业务失败（清理出错/探测被限/rotate 无账号/daemon 锁冲突/
-  diagnose 被限流）；2 配置错误/argparse 错误/diagnose 网络层失败；130 Ctrl+C。
+  diagnose 被限流/`explain`·离线命中限额）；2 配置错误/argparse 错误/diagnose 网络层失败/
+  `explain`·离线命中错误类或无输入；130 Ctrl+C。
 
 ## 8. 日志（logs.py）
 

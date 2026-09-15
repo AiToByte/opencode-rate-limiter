@@ -39,6 +39,7 @@ uv run opencode-rate-limiter --help
 | `rotate` | 手动轮换账号池 |
 | `check` | 健康检查聚合输出（含守护进程状态） |
 | `diagnose` | Zen 限额诊断（出口 IP / 代理 / 429 分层 / 建议） |
+| `explain` | 离线解释一条 opencode 报错（零配额，不发探测） |
 | `daemon` | 后台守护进程模式（单实例锁） |
 | `generate-systemd` | 生成 systemd 服务文件 |
 | `generate-launchd` | 生成 macOS launchd plist |

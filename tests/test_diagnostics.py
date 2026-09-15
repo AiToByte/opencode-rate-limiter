@@ -244,6 +244,53 @@ class TestRunDiagnostics:
         for section in ("出口与网络", "凭证", "探测", "发现", "结论: 被限流"):
             assert section in report
 
+    @pytest.mark.asyncio
+    async def test_rate_limit_unknown_message_gets_reset_guidance(
+        self, monkeypatch, tmp_path
+    ):
+        probe = _result(
+            status="rate_limited",
+            http_status=400,
+            error="Rate limit exceeded. Please try again later.",
+            error_type="RateLimitUnknown",
+            error_kind="rate_limited",
+        )
+        _patch_env(monkeypatch, tmp_path, probe)
+        diagnosis = await run_diagnostics(Config(), model="m1")
+        assert diagnosis.verdict == "rate_limited"
+        titles = [f.title for f in diagnosis.findings]
+        assert any("层级未知" in t or "被限流" in t for t in titles)
+        assert any("重置" in t for t in titles)
+
+    @pytest.mark.asyncio
+    async def test_reasoning_replay_warns_no_rotation(self, monkeypatch, tmp_path):
+        probe = _result(
+            status="error",
+            http_status=400,
+            error="Upstream request failed: reasoning `encrypted_content` was not issued",
+            error_type="invalid_request_error",
+            error_kind="reasoning_replay",
+        )
+        _patch_env(monkeypatch, tmp_path, probe)
+        diagnosis = await run_diagnostics(Config(), model="m1")
+        assert diagnosis.verdict == "error"
+        titles = [f.title for f in diagnosis.findings]
+        assert any("会话污染" in t for t in titles)
+        assert any("切勿轮换" in t for t in titles)
+
+    @pytest.mark.asyncio
+    async def test_transient_transport_maps_to_network(self, monkeypatch, tmp_path):
+        probe = _result(
+            status="error",
+            http_status=None,
+            error="Cannot connect to API: The socket connection was closed unexpectedly.",
+            error_kind="transient_transport",
+        )
+        _patch_env(monkeypatch, tmp_path, probe)
+        diagnosis = await run_diagnostics(Config(), model="m1")
+        assert diagnosis.verdict == "error"
+        assert any("未到达网关限流层" in f.title for f in diagnosis.findings)
+
     def test_diagnosis_defaults(self):
         d = Diagnosis()
         assert d.verdict == "unknown"

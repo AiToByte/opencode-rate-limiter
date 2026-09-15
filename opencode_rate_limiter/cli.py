@@ -19,6 +19,7 @@ from .completions import generate_completions
 from .config import Config
 from .daemon import DaemonLockError, RateLimiterDaemon, load_daemon_state
 from .diagnostics import format_report, run_diagnostics
+from .errors import ErrorKind, classify_opencode_log_line, explain_kind
 from .headers import HeaderInjector
 from .logs import level_from_args, setup_logging
 from .meta import __version__
@@ -159,6 +160,7 @@ async def cmd_probe(config: Config, args: argparse.Namespace) -> int:
                 success=r.status == "available",
                 latency_ms=r.latency_ms,
                 error_type=r.error_type,
+                error_kind=r.error_kind,
             )
 
     if args.json:
@@ -543,7 +545,121 @@ def _export_daemon_events(args: argparse.Namespace, export_path: Path | str) -> 
     return 0
 
 
+def _explain_one(text: str) -> dict[str, Any]:
+    """Classify one pasted error line into a JSON-serializable explanation."""
+    trimmed = text.strip()[:2000]
+    result = classify_opencode_log_line(trimmed)
+    kind: ErrorKind = result.kind
+    title, detail, remedy = explain_kind(kind)
+    return {
+        "input": trimmed[:500],
+        "kind": kind,
+        "matched": result.matched,
+        "title": title,
+        "detail": detail,
+        "remedy": remedy,
+    }
+
+
+def _explain_exit(results: list[dict[str, Any]]) -> int:
+    kinds = {r["kind"] for r in results}
+    if kinds & {"reasoning_replay", "transient_transport", "upstream", "auth", "server"}:
+        return 2
+    if "rate_limited" in kinds:
+        return 1
+    return 0
+
+
+def _read_explain_lines(args: argparse.Namespace) -> list[str] | None:
+    """Collect input lines for explain/offline-diagnose; None means no offline input."""
+    from_log = getattr(args, "from_log", None)
+    if from_log is not None:
+        try:
+            content = Path(from_log).expanduser().read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            print(f"Cannot read log file {from_log}: {e}")
+            return []
+        lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+        if len(content) > 1_000_000:
+            print("Log file too large (>1MB); refusing to parse.")
+            return []
+        return lines[:50]
+    from_text = getattr(args, "from_text", None)
+    if from_text:
+        return [from_text]
+    text = getattr(args, "text", None)
+    if text:
+        return [text]
+    return None
+
+
+async def cmd_explain(config: Config, args: argparse.Namespace) -> int:
+    del config  # offline only: no config, no network, no quota consumed
+    lines = _read_explain_lines(args)
+    if not lines:
+        print('Usage: opencode-rate-limiter explain "<error text>" [--from-log FILE]')
+        print("Zero-quota offline classification; nothing is sent to the gateway.")
+        return 2
+    results = [_explain_one(line) for line in lines]
+    if args.json:
+        if len(results) == 1:
+            print(json.dumps(results[0], indent=2, ensure_ascii=False))
+        else:
+            summary: dict[str, int] = {}
+            for r in results:
+                summary[r["kind"]] = summary.get(r["kind"], 0) + 1
+            payload = {"results": results, "summary": summary}
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        for r in results:
+            print(f"[{r['kind']}] {r['title']}")
+            print(f"  {r['detail']}")
+            print(f"  → 建议: {r['remedy']}")
+            if len(results) > 1:
+                print(f"  原文: {r['input'][:160]}")
+    return _explain_exit(results)
+
+
 async def cmd_diagnose(config: Config, args: argparse.Namespace) -> int:
+    offline = _read_explain_lines(args)
+    if offline is not None:
+        if not offline:
+            return 2
+        from .diagnostics import Diagnosis, Finding
+
+        results = [_explain_one(line) for line in offline]
+        findings = [
+            Finding(
+                "fail" if r["kind"] != "unknown" else "info",
+                r["title"],
+                f"{r['detail']}\n原文: {r['input'][:300]}",
+                remedy=r["remedy"],
+            )
+            for r in results
+        ]
+        kinds = {r["kind"] for r in results}
+        if "rate_limited" in kinds and len(kinds) == 1:
+            verdict, exit_code = "rate_limited", 1
+        elif kinds == {"unknown"}:
+            verdict, exit_code = "unknown", 0
+        else:
+            verdict, exit_code = "error", 2
+        if args.json:
+            report = Diagnosis(
+                timestamp=_dt.datetime.now(_dt.UTC).isoformat().replace("+00:00", "Z"),
+                model="offline",
+                verdict=verdict,
+                exit_code=exit_code,
+                probe={"offline_inputs": len(results), "results": results},
+                findings=findings,
+            )
+            print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+        else:
+            for r in results:
+                print(f"[{r['kind']}] {r['title']}")
+                print(f"  {r['detail']}")
+                print(f"  → 建议: {r['remedy']}")
+        return exit_code
     report = await run_diagnostics(config, model=args.model)
     if args.json:
         print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
@@ -715,6 +831,7 @@ COMMAND_HANDLERS = {
     "rotate": cmd_rotate,
     "check": cmd_check,
     "diagnose": cmd_diagnose,
+    "explain": cmd_explain,
     "daemon": cmd_daemon,
     "generate-systemd": cmd_generate_systemd,
     "generate-launchd": cmd_generate_launchd,

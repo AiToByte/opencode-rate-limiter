@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 
 from .config import ProberConfig
+from .errors import TRANSIENT_MARKERS, classify_http, classify_transport
 
 
 @dataclass
@@ -26,6 +27,10 @@ class ProbeResult:
     latency_ms: float = 0.0
     error: str | None = None
     error_type: str | None = None
+    # Unified classification (errors.py ErrorKind): lets diagnostics / daemon
+    # tell rate limits apart from transient transport and poisoned-session
+    # (reasoning replay) failures without re-parsing strings.
+    error_kind: str | None = None
     # Per-request token cost reported by the gateway (OpenAI-compatible
     # `usage` object). Informational only: the gateway exposes no quota
     # counters, so this cannot be turned into a "remaining" figure.
@@ -42,6 +47,7 @@ class ProbeResult:
             "latency_ms": round(self.latency_ms, 1),
             "error": self.error,
             "error_type": self.error_type,
+            "error_kind": self.error_kind,
             "usage": self.usage,
             "timestamp": self.timestamp,
         }
@@ -56,7 +62,9 @@ class ModelProber:
     """
 
     #: Error prefixes worth an immediate retry (transient network faults).
-    #: HTTP statuses — including 429 — are never retried.
+    #: HTTP statuses — including 429 — are never retried. Substring markers
+    #: from errors.TRANSIENT_MARKERS (e.g. gateway-closed sockets surfacing as
+    #: a generic Exception string) are also retryable; see _is_transient_error.
     TRANSIENT_ERROR_PREFIXES = ("connect failed", "connect timeout", "read timeout")
 
     ZEN_ENDPOINT = "https://opencode.ai/zen/v1/chat/completions"
@@ -182,17 +190,45 @@ class ModelProber:
                     retry_after=retry_after_int,
                     estimated_reset=self._estimate_reset(retry_after_int),
                     latency_ms=latency,
+                    error=_parse_error_message(resp),
                     error_type=_parse_error_type(resp),
+                    error_kind="rate_limited",
                     timestamp=timestamp,
                 )
             else:
+                error_type = _parse_error_type(resp)
+                error_message = _parse_error_message(resp)
+                kind = classify_http(resp.status_code, error_type, error_message).kind
+                if kind == "rate_limited":
+                    # Gateway returned a rate-limit message without a 429
+                    # status (client wrapping / shape drift): still a limit.
+                    raw_retry = resp.headers.get("Retry-After")
+                    retry_int = _parse_retry_after(raw_retry)
+                    return ProbeResult(
+                        model=model,
+                        status="rate_limited",
+                        http_status=resp.status_code,
+                        retry_after=retry_int,
+                        estimated_reset=self._estimate_reset(retry_int),
+                        latency_ms=latency,
+                        error=error_message or f"HTTP {resp.status_code}",
+                        error_type=error_type or "RateLimitUnknown",
+                        error_kind="rate_limited",
+                        timestamp=timestamp,
+                    )
+                normalized = error_type
+                if kind in ("reasoning_replay", "upstream") and error_type is None:
+                    normalized = (
+                        "ReasoningReplayError" if kind == "reasoning_replay" else "UpstreamError"
+                    )
                 return ProbeResult(
                     model=model,
                     status="error",
                     http_status=resp.status_code,
                     latency_ms=latency,
-                    error=f"HTTP {resp.status_code}",
-                    error_type=_parse_error_type(resp),
+                    error=error_message or f"HTTP {resp.status_code}",
+                    error_type=normalized,
+                    error_kind=kind,
                     timestamp=timestamp,
                 )
 
@@ -203,27 +239,38 @@ class ModelProber:
                 status="error",
                 latency_ms=latency,
                 error=f"connect failed: {e}",
+                error_kind="transient_transport",
                 timestamp=timestamp,
             )
         except httpx.TimeoutException as e:
             latency = (time.monotonic() - start) * 1000
             # Connect timeouts point at the proxy/link; read timeouts at a
             # slow gateway — the distinction drives different remedies.
-            kind = "connect timeout" if isinstance(e, httpx.ConnectTimeout) else "read timeout"
+            timeout_kind = (
+                "connect timeout" if isinstance(e, httpx.ConnectTimeout) else "read timeout"
+            )
             return ProbeResult(
                 model=model,
                 status="error",
                 latency_ms=latency,
-                error=kind,
+                error=timeout_kind,
+                error_kind="transient_transport",
                 timestamp=timestamp,
             )
         except Exception as e:
             latency = (time.monotonic() - start) * 1000
+            text = str(e)
+            # httpx transport faults (RemoteProtocolError, ReadError, ...) and
+            # Bun-style "socket connection was closed unexpectedly" strings
+            # surface here; classify so transient ones become retryable while
+            # poisoned-session text keeps its kind for diagnostics.
+            kind = classify_transport(text).kind
             return ProbeResult(
                 model=model,
                 status="error",
                 latency_ms=latency,
-                error=str(e),
+                error=text,
+                error_kind=kind if kind != "unknown" else None,
                 timestamp=timestamp,
             )
 
@@ -316,12 +363,14 @@ def _parse_retry_after(raw: str | None) -> int | None:
 
 def _is_transient_error(result: ProbeResult) -> bool:
     """Whether a probe result reflects a transient network fault (retryable)."""
-    return (
-        result.status == "error"
-        and result.http_status is None
-        and isinstance(result.error, str)
-        and result.error.startswith(ModelProber.TRANSIENT_ERROR_PREFIXES)
-    )
+    if result.status != "error" or result.http_status is not None:
+        return False
+    if not isinstance(result.error, str) or not result.error:
+        return False
+    if result.error.startswith(ModelProber.TRANSIENT_ERROR_PREFIXES):
+        return True
+    lowered = result.error.lower()
+    return any(marker in lowered for marker in TRANSIENT_MARKERS)
 
 
 def _parse_usage(resp: httpx.Response) -> dict[str, int] | None:
@@ -368,3 +417,36 @@ def _parse_error_type(resp: httpx.Response) -> str | None:
             if isinstance(err_type, str):
                 return err_type
     return None
+
+
+def _parse_error_message(resp: httpx.Response) -> str | None:
+    """Extract a human error message from a Zen error body.
+
+    Covers {"error": {"message": ...}}, {"error": "<str>"}, {"message": ...}
+    and {"detail": ...}; truncated to 500 chars so a huge HTML error page
+    never pollutes logs/state. Returns None when absent or unparsable.
+    """
+    try:
+        length = resp.headers.get("Content-Length")
+        if length is not None and int(length) > ModelProber.MAX_PARSED_BODY_BYTES:
+            return None
+        body = resp.json()
+    except Exception:
+        return None
+    message: object = None
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            message = err.get("message")
+        elif isinstance(err, str):
+            message = err
+        if not isinstance(message, str):
+            raw = body.get("message", body.get("detail"))
+            if isinstance(raw, str):
+                message = raw
+    if not isinstance(message, str):
+        return None
+    text = message.strip()
+    if not text:
+        return None
+    return text[:500]
