@@ -183,6 +183,7 @@ class ModelProber:
             elif resp.status_code == 429:
                 retry_after = resp.headers.get("Retry-After")
                 retry_after_int = _parse_retry_after(retry_after)
+                error_type, error_message = _parse_error_body(resp)
                 return ProbeResult(
                     model=model,
                     status="rate_limited",
@@ -190,14 +191,13 @@ class ModelProber:
                     retry_after=retry_after_int,
                     estimated_reset=self._estimate_reset(retry_after_int),
                     latency_ms=latency,
-                    error=_parse_error_message(resp),
-                    error_type=_parse_error_type(resp),
+                    error=error_message,
+                    error_type=error_type,
                     error_kind="rate_limited",
                     timestamp=timestamp,
                 )
             else:
-                error_type = _parse_error_type(resp)
-                error_message = _parse_error_message(resp)
+                error_type, error_message = _parse_error_body(resp)
                 kind = classify_http(resp.status_code, error_type, error_message).kind
                 if kind == "rate_limited":
                     # Gateway returned a rate-limit message without a 429
@@ -401,22 +401,48 @@ def _parse_usage(resp: httpx.Response) -> dict[str, int] | None:
     return parsed or None
 
 
-def _parse_error_type(resp: httpx.Response) -> str | None:
-    """Extract error.type from a Zen error body: {"error": {"type": ...}}"""
+def _parse_error_body(resp: httpx.Response) -> tuple[str | None, str | None]:
+    """Parse a Zen error body once, returning (error.type, message).
+
+    Covers {"error": {"type", "message"}}, {"error": "<str>"},
+    {"message": ...} and {"detail": ...}; the message is truncated to 500
+    chars so a huge HTML error page never pollutes logs/state. Oversized or
+    unparsable bodies yield (None, None).
+    """
     try:
         length = resp.headers.get("Content-Length")
         if length is not None and int(length) > ModelProber.MAX_PARSED_BODY_BYTES:
-            return None
+            return None, None
         body = resp.json()
     except Exception:
-        return None
-    if isinstance(body, dict):
-        err = body.get("error")
-        if isinstance(err, dict):
-            err_type = err.get("type")
-            if isinstance(err_type, str):
-                return err_type
-    return None
+        return None, None
+    if not isinstance(body, dict):
+        return None, None
+    err_type: str | None = None
+    message: object = None
+    err = body.get("error")
+    if isinstance(err, dict):
+        raw_type = err.get("type")
+        if isinstance(raw_type, str):
+            err_type = raw_type
+        message = err.get("message")
+    elif isinstance(err, str):
+        message = err
+    if not isinstance(message, str):
+        raw = body.get("message", body.get("detail"))
+        if isinstance(raw, str):
+            message = raw
+    text: str | None = None
+    if isinstance(message, str):
+        stripped = message.strip()
+        if stripped:
+            text = stripped[:500]
+    return err_type, text
+
+
+def _parse_error_type(resp: httpx.Response) -> str | None:
+    """Extract error.type from a Zen error body: {"error": {"type": ...}}"""
+    return _parse_error_body(resp)[0]
 
 
 def _parse_error_message(resp: httpx.Response) -> str | None:
@@ -426,27 +452,4 @@ def _parse_error_message(resp: httpx.Response) -> str | None:
     and {"detail": ...}; truncated to 500 chars so a huge HTML error page
     never pollutes logs/state. Returns None when absent or unparsable.
     """
-    try:
-        length = resp.headers.get("Content-Length")
-        if length is not None and int(length) > ModelProber.MAX_PARSED_BODY_BYTES:
-            return None
-        body = resp.json()
-    except Exception:
-        return None
-    message: object = None
-    if isinstance(body, dict):
-        err = body.get("error")
-        if isinstance(err, dict):
-            message = err.get("message")
-        elif isinstance(err, str):
-            message = err
-        if not isinstance(message, str):
-            raw = body.get("message", body.get("detail"))
-            if isinstance(raw, str):
-                message = raw
-    if not isinstance(message, str):
-        return None
-    text = message.strip()
-    if not text:
-        return None
-    return text[:500]
+    return _parse_error_body(resp)[1]

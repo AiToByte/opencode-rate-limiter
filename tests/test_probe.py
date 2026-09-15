@@ -1,5 +1,7 @@
 """Phase 2 module tests - HeaderInjector, ModelProber, AccountPool, CleanupManager."""
 
+from typing import Any
+
 import pytest
 
 from opencode_rate_limiter import (
@@ -282,9 +284,7 @@ class TestModelProber:
         from opencode_rate_limiter import ProberConfig
 
         httpx_mock.add_exception(
-            Exception(
-                "Cannot connect to API: The socket connection was closed unexpectedly."
-            )
+            Exception("Cannot connect to API: The socket connection was closed unexpectedly.")
         )
         httpx_mock.add_response(url=ModelProber.ZEN_ENDPOINT, status_code=200, json={})
         prober = ModelProber(10.0, ProberConfig(max_retries=1))
@@ -298,6 +298,82 @@ class TestModelProber:
 
         r = ProbeResult(model="m", status="error", error="boom: socket connection was closed")
         assert _is_transient_error(r) is True
+
+    @pytest.mark.asyncio
+    async def test_probe_reasoning_without_type_normalizes(self, httpx_mock):
+        httpx_mock.add_response(
+            url=ModelProber.ZEN_ENDPOINT,
+            status_code=400,
+            json={"error": {"message": "reasoning `encrypted_content` was not issued"}},
+        )
+        result = await ModelProber(10.0).probe("model", {})
+        assert result.status == "error"
+        assert result.error_kind == "reasoning_replay"
+        assert result.error_type == "ReasoningReplayError"
+
+    @pytest.mark.asyncio
+    async def test_probe_upstream_without_type_normalizes(self, httpx_mock):
+        httpx_mock.add_response(
+            url=ModelProber.ZEN_ENDPOINT,
+            status_code=502,
+            json={"error": {"message": "Upstream request failed: timeout"}},
+        )
+        result = await ModelProber(10.0).probe("model", {})
+        assert result.status == "error"
+        assert result.error_kind == "upstream"
+        assert result.error_type == "UpstreamError"
+
+
+class TestParseErrorBody:
+    """_parse_error_body: single-parse shapes, truncation, size cap."""
+
+    def _resp(self, payload: object) -> Any:
+        import httpx as _httpx
+
+        return _httpx.Response(200, json=payload)
+
+    def test_error_dict_shape(self):
+        from opencode_rate_limiter.prober import _parse_error_body
+
+        assert _parse_error_body(self._resp({"error": {"type": "X", "message": "boom"}})) == (
+            "X",
+            "boom",
+        )
+
+    def test_error_string_shape(self):
+        from opencode_rate_limiter.prober import _parse_error_body
+
+        assert _parse_error_body(self._resp({"error": "just a string"})) == (None, "just a string")
+
+    def test_top_level_message_and_detail(self):
+        from opencode_rate_limiter.prober import _parse_error_body
+
+        assert _parse_error_body(self._resp({"message": "m1"})) == (None, "m1")
+        assert _parse_error_body(self._resp({"detail": "d1"})) == (None, "d1")
+
+    def test_blank_and_non_json_are_none(self):
+        from opencode_rate_limiter.prober import _parse_error_body
+
+        assert _parse_error_body(self._resp({"error": {"message": "   "}})) == (None, None)
+        assert _parse_error_body(self._resp({"ok": True})) == (None, None)
+
+    def test_message_truncated_to_500(self):
+        from opencode_rate_limiter.prober import _parse_error_body
+
+        _, text = _parse_error_body(self._resp({"error": {"message": "x" * 600}}))
+        assert text is not None and len(text) == 500
+
+    def test_oversized_body_skipped(self):
+        import httpx as _httpx
+
+        from opencode_rate_limiter.prober import _parse_error_body
+
+        big = _httpx.Response(
+            400,
+            headers={"Content-Length": str(65 * 1024)},
+            json={"error": {"type": "X", "message": "y"}},
+        )
+        assert _parse_error_body(big) == (None, None)
 
 
 class TestProberSessionConfig:

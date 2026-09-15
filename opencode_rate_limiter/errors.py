@@ -145,9 +145,7 @@ def classify_http(
 
     hit = _contains_any(blob, AUTH_MARKERS)
     if hit is not None:
-        return ClassifyResult(
-            kind="auth", matched=hit, normalized_type=error_type or "AuthError"
-        )
+        return ClassifyResult(kind="auth", matched=hit, normalized_type=error_type or "AuthError")
 
     if http_status is not None and 500 <= http_status <= 599:
         return ClassifyResult(
@@ -199,18 +197,18 @@ def classify_opencode_log_line(line: str) -> ClassifyResult:
     if not line:
         return ClassifyResult(kind="unknown")
     blob = line.lower()
-    for markers, kind in (
+    table: tuple[tuple[tuple[str, ...], ErrorKind], ...] = (
         (REASONING_MARKERS, "reasoning_replay"),
         (RATE_LIMIT_MARKERS, "rate_limited"),
         (TRANSIENT_MARKERS, "transient_transport"),
         (UPSTREAM_MARKERS, "upstream"),
         (AUTH_MARKERS, "auth"),
         (SERVER_MARKERS, "server"),
-    ):
+    )
+    for markers, kind in table:
         hit = _contains_any(blob, markers)
         if hit is not None:
-            kind_lit: ErrorKind = kind  # type: ignore[assignment]
-            return ClassifyResult(kind=kind_lit, matched=hit)
+            return ClassifyResult(kind=kind, matched=hit)
     return ClassifyResult(kind="unknown")
 
 

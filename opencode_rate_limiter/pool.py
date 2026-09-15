@@ -276,12 +276,6 @@ class AccountPool:
             )
             return
 
-        if not success and error_type == "FreeUsageLimitError":
-            self.log.debug(
-                "Skipping health mark for %s: IP-level limit, not a credential failure", name
-            )
-            return
-
         h.total_count += 1
         now = time.time()
         h.results.append(success)

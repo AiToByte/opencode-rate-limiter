@@ -68,6 +68,45 @@ class TestCmdExplain:
     async def test_no_input_usage(self, capsys):
         assert await cmd_explain(Config(), _args()) == 2
 
+    @pytest.mark.asyncio
+    async def test_stdin_piped_input(self, monkeypatch, capsys):
+        import io
+
+        stdin = io.StringIO("Rate limit exceeded. Please try again later.\n")
+        stdin.isatty = lambda: False  # type: ignore[method-assign]
+        monkeypatch.setattr("sys.stdin", stdin)
+        code = await cmd_explain(Config(), _args(json=True))
+        assert code == 1
+        assert json.loads(capsys.readouterr().out)["kind"] == "rate_limited"
+
+    @pytest.mark.asyncio
+    async def test_stdin_empty_is_usage(self, monkeypatch):
+        import io
+
+        stdin = io.StringIO("   \n")
+        stdin.isatty = lambda: False  # type: ignore[method-assign]
+        monkeypatch.setattr("sys.stdin", stdin)
+        assert await cmd_explain(Config(), _args()) == 2
+
+    @pytest.mark.asyncio
+    async def test_missing_log_file(self, tmp_path, capsys):
+        code = await cmd_explain(Config(), _args(from_log=tmp_path / "nope.log"))
+        assert code == 2
+        assert "Cannot read log file" in capsys.readouterr().out
+
+    @pytest.mark.asyncio
+    async def test_oversized_log_refused(self, tmp_path, capsys):
+        big = tmp_path / "big.log"
+        big.write_bytes(b"x\n" * 600_000)  # >1MB
+        assert await cmd_explain(Config(), _args(from_log=big)) == 2
+        assert "too large" in capsys.readouterr().out
+
+    @pytest.mark.asyncio
+    async def test_empty_log_is_usage(self, tmp_path):
+        empty = tmp_path / "empty.log"
+        empty.write_text("   \n", encoding="utf-8")
+        assert await cmd_explain(Config(), _args(from_log=empty)) == 2
+
 
 class TestDiagnoseOffline:
     @pytest.mark.asyncio
@@ -84,3 +123,11 @@ class TestDiagnoseOffline:
             Config(), _args(from_text="encrypted_content was not issued", json=True, model=None)
         )
         assert code == 2
+
+    @pytest.mark.asyncio
+    async def test_from_text_unknown(self, capsys):
+        code = await cmd_diagnose(
+            Config(), _args(from_text="hello world, all good", json=True, model=None)
+        )
+        assert code == 0
+        assert json.loads(capsys.readouterr().out)["verdict"] == "unknown"

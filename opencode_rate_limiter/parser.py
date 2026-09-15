@@ -55,6 +55,8 @@ Examples:
   opencode-rate-limiter headers --export         # Export headers for curl
   opencode-rate-limiter daemon --interval 60     # Run as daemon
   opencode-rate-limiter check --json             # Health check
+  opencode-rate-limiter diagnose                 # Diagnose a limit (1 probe)
+  opencode-rate-limiter explain "<error text>"   # Explain offline, zero quota
         """,
     )
     parser.add_argument("--config", type=Path, help="配置文件路径")

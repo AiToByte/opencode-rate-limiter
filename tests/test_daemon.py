@@ -1223,3 +1223,149 @@ class TestNotifications:
         with pytest.raises(ValueError, match="notify_webhook"):
             DaemonConfig(notify_webhook="ftp://x").validate()
         DaemonConfig(notify_webhook="https://ok.example.com/hook").validate()
+
+
+class TestNonCredentialFailurePolicy:
+    """transient / reasoning-replay / upstream：不记健康、不冷却、不轮换、只记事件"""
+
+    def _daemon_with(self, tmp_path, result: ProbeResult) -> RateLimiterDaemon:
+        daemon = make_daemon(
+            tmp_path,
+            models=["m1"],
+            auto_cleanup=False,
+            accounts=[{"name": "a", "auth_json": "{}"}],
+            strategy="health",
+        )
+
+        async def probe(model: str, headers: dict[str, str]) -> ProbeResult:
+            return result
+
+        daemon.prober.probe = probe  # type: ignore[method-assign]
+        return daemon
+
+    @pytest.mark.asyncio
+    async def test_transient_records_event_and_spares_health(self, tmp_path):
+        daemon = self._daemon_with(
+            tmp_path,
+            ProbeResult(
+                model="m1",
+                status="error",
+                error="socket connection was closed",
+                error_kind="transient_transport",
+                timestamp="t",
+            ),
+        )
+        await daemon._probe_cycle()
+        assert daemon.pool is not None
+        assert daemon.pool.health["a"].total_count == 0
+        assert not daemon._key_cooldowns
+        assert any(e["kind"] == "transient_skipped" for e in daemon.status.events)
+
+    @pytest.mark.asyncio
+    async def test_reasoning_replay_records_event_without_rotation(self, tmp_path):
+        daemon = make_daemon(
+            tmp_path,
+            models=["m1"],
+            auto_cleanup=False,
+            accounts=[{"name": "a", "auth_json": '{"access": "tok"}'}],
+            strategy="health",
+        )
+
+        async def probe(model: str, headers: dict[str, str]) -> ProbeResult:
+            assert headers.get("Authorization") == "Bearer tok"  # 凭证注入不受影响
+            return ProbeResult(
+                model=model,
+                status="error",
+                http_status=400,
+                error="reasoning `encrypted_content` was not issued",
+                error_type="invalid_request_error",
+                error_kind="reasoning_replay",
+                timestamp="t",
+            )
+
+        daemon.prober.probe = probe  # type: ignore[method-assign]
+        await daemon._probe_cycle()
+        assert daemon.pool is not None
+        assert daemon.pool.health["a"].total_count == 0
+        assert not daemon._key_cooldowns
+        kinds = [e["kind"] for e in daemon.status.events]
+        assert "reasoning_replay" in kinds
+        assert "rotation" not in kinds  # 污染会话绝不轮换
+
+    @pytest.mark.asyncio
+    async def test_transient_all_accounts_cooling_still_records_event(self, tmp_path):
+        import time as _time
+
+        daemon = make_daemon(
+            tmp_path,
+            models=["m1"],
+            auto_cleanup=False,
+            accounts=[{"name": "a", "auth_json": "{}"}],
+        )
+        # 全员 key 冷却 → _pick_account 取不到账号走 continue 分支，不应崩溃
+        daemon._key_cooldowns["a"] = _time.monotonic() + 3600
+
+        async def probe(model: str, headers: dict[str, str]) -> ProbeResult:
+            return ProbeResult(
+                model=model,
+                status="error",
+                error="socket connection was closed",
+                error_kind="transient_transport",
+                timestamp="t",
+            )
+
+        daemon.prober.probe = probe  # type: ignore[method-assign]
+        await daemon._probe_cycle()
+        assert any(e["kind"] == "transient_skipped" for e in daemon.status.events)
+
+    @pytest.mark.asyncio
+    async def test_upstream_records_event(self, tmp_path):
+        daemon = self._daemon_with(
+            tmp_path,
+            ProbeResult(
+                model="m1",
+                status="error",
+                http_status=502,
+                error="Upstream request failed",
+                error_type="UpstreamError",
+                error_kind="upstream",
+                timestamp="t",
+            ),
+        )
+        await daemon._probe_cycle()
+        assert daemon.pool is not None
+        assert daemon.pool.health["a"].total_count == 0
+        assert any(e["kind"] == "upstream_error" for e in daemon.status.events)
+
+    @pytest.mark.asyncio
+    async def test_transient_does_not_clear_rate_limit_cooldown(self, tmp_path):
+        daemon = self._daemon_with(
+            tmp_path,
+            ProbeResult(
+                model="m1",
+                status="error",
+                error="socket connection was closed",
+                error_kind="transient_transport",
+                timestamp="t",
+            ),
+        )
+        import time as _time
+
+        # respect_cooldown=False 时模型仍被探测，陈旧冷却项必须保留
+        daemon.config.daemon.respect_cooldown = False
+        daemon._cooldowns["m1"] = _time.monotonic() + 3600
+        await daemon._probe_cycle()
+        assert "m1" in daemon._cooldowns  # 瞬断不冲掉有效限额冷却
+
+    @pytest.mark.asyncio
+    async def test_available_still_clears_cooldown(self, tmp_path):
+        daemon = self._daemon_with(
+            tmp_path,
+            ProbeResult(model="m1", status="available", http_status=200, timestamp="t"),
+        )
+        import time as _time
+
+        daemon.config.daemon.respect_cooldown = False
+        daemon._cooldowns["m1"] = _time.monotonic() + 3600
+        await daemon._probe_cycle()
+        assert "m1" not in daemon._cooldowns

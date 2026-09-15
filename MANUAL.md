@@ -1,6 +1,6 @@
 # opencode-rate-limiter 技术说明与使用手册
 
-版本：0.6.2
+版本：0.7.0
 适用范围：本手册内容全部来自对 `opencode_rate_limiter/` 包实际代码的核对，不描述任何未实现的功能。场景化操作见 `docs/user-guide.md`，架构/实现/功能文档见
 `docs/`；早期拆分文档已移除，其历史差异结论保留在文末「实现事实与文档差异」。
 
@@ -45,7 +45,7 @@
 
 ### 特性摘要
 
-- **纯 Python 包**（`opencode_rate_limiter/`，13 个职责单一模块），Python 3.11+（使用标准库 `tomllib`）
+- **纯 Python 包**（`opencode_rate_limiter/`，14 个职责单一模块），Python 3.11+（使用标准库 `tomllib`）
 - 运行时依赖仅三个：`httpx`、`platformdirs`、`tomli-w`（`tomli-w` 仅 `generate-config`
   写配置时使用，可视为可选）
 - 配置优先级：CLI `--config` > `$OPENCODE_RATE_LIMITER_CONFIG` 环境变量 > 平台配置目录
@@ -95,6 +95,7 @@ opencode-rate-limiter/
 | `config` | `FREE_MODELS`、`DaemonConfig`、`AccountPoolConfig`、`ProberConfig`、`HeadersConfig`、`CleanupConfig`、`Config` |
 | `headers` | `HeaderInjector` |
 | `prober` | `ProbeResult`、`ModelProber` |
+| `errors` | `ErrorKind`、`classify_http` / `classify_transport` / `classify_opencode_log_line`、`explain_kind`（无依赖纯函数，`prober`/`diagnostics`/`explain` 同源） |
 | `pool` | `AccountHealth`、`Account`、`extract_credential`、`build_auth_payload`、`AccountPool` |
 | `cleanup` | `CleanupResult`、`CleanupManager` |
 | `logs` | `JSONFormatter`、`HumanFormatter`、`setup_logging`、`level_from_args` |
@@ -532,6 +533,7 @@ opencode-rate-limiter explain --from-log PATH [--json]
 
 退出码：`1` 命中限流；`2` 命中错误类；`0` 未知/无命中。`--from-log` 逐行分类
 （最多 50 行、1MB 上限），`--json` 下多行输出 `{results[], summary{kind: count}}`。
+无参数且 stdin 非终端时自动读管道输入（`opencode … 2>&1 | opencode-rate-limiter explain`）。
 
 ### 4.9 `daemon` —— 后台守护进程
 

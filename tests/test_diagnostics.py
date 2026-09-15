@@ -245,9 +245,7 @@ class TestRunDiagnostics:
             assert section in report
 
     @pytest.mark.asyncio
-    async def test_rate_limit_unknown_message_gets_reset_guidance(
-        self, monkeypatch, tmp_path
-    ):
+    async def test_rate_limit_unknown_message_gets_reset_guidance(self, monkeypatch, tmp_path):
         probe = _result(
             status="rate_limited",
             http_status=400,
@@ -295,6 +293,54 @@ class TestRunDiagnostics:
         d = Diagnosis()
         assert d.verdict == "unknown"
         assert d.to_dict()["findings"] == []
+
+
+class TestProbeFindingsBranches:
+    """Direct _probe_findings coverage: upstream / generic fallback / proxy hints."""
+
+    def test_upstream_finding(self):
+        from opencode_rate_limiter.diagnostics import _probe_findings
+
+        findings, verdict, code = _probe_findings(
+            _result(
+                status="error",
+                http_status=502,
+                error="Upstream request failed: timeout",
+                error_type="UpstreamError",
+                error_kind="upstream",
+            ),
+            "m1",
+        )
+        assert verdict == "error" and code == 2
+        assert any("上游" in f.title for f in findings)
+
+    def test_generic_fallback_without_kind_or_type(self, monkeypatch):
+        from opencode_rate_limiter.diagnostics import _probe_findings
+
+        for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"):
+            monkeypatch.delenv(var, raising=False)
+            monkeypatch.delenv(var.lower(), raising=False)
+        findings, verdict, code = _probe_findings(
+            _result(status="error", http_status=None, error="weird failure"), "m1"
+        )
+        assert verdict == "error" and code == 2
+        assert any("未到达网关限流层" in f.title for f in findings)
+        assert any("未检测到代理" in f.title for f in findings)
+
+    def test_proxy_hint_when_proxy_set(self, monkeypatch):
+        from opencode_rate_limiter.diagnostics import _probe_findings
+
+        monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
+        findings, _, _ = _probe_findings(
+            _result(
+                status="error",
+                http_status=None,
+                error="socket connection was closed",
+                error_kind="transient_transport",
+            ),
+            "m1",
+        )
+        assert any("检测到代理环境变量" in f.title for f in findings)
 
 
 # httpx import guard (used by timeout test)

@@ -110,6 +110,8 @@ def test_generate_completions_all_outputs_differ() -> None:
         ("daemon", False, True),
         ("check", False, False),
         ("probe", False, False),
+        ("diagnose", False, False),
+        ("explain", False, False),
         ("headers", False, False),
         ("generate-task", False, False),
         ("completions", False, False),

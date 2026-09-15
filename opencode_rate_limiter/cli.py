@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -590,6 +591,16 @@ def _read_explain_lines(args: argparse.Namespace) -> list[str] | None:
     text = getattr(args, "text", None)
     if text:
         return [text]
+    if not sys.stdin.isatty():
+        # Piped input: `opencode ... 2>&1 | opencode-rate-limiter explain`.
+        try:
+            piped = sys.stdin.read()
+        except OSError:
+            return None
+        lines = [ln.strip() for ln in piped.splitlines() if ln.strip()]
+        if lines:
+            return lines[:50]
+        return []
     return None
 
 

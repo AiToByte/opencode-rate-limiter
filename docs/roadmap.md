@@ -1,6 +1,6 @@
 # opencode-rate-limiter 迭代路线图（Roadmap）
 
-版本：2026-09 · 基线：v0.4.1（正确性收尾：文件锁/归因/合并/超时细分）
+版本：2026-09 · 基线：v0.7.0（三类真实报错统一分类 + explain 零配额离线解释）
 配套：[architecture.md](architecture.md) · [features.md](features.md) ·
 [implementation.md](implementation.md) · [user-guide.md](user-guide.md) ·
 [MANUAL.md](../MANUAL.md)
@@ -260,3 +260,12 @@ R1 (key 轮换) ──► R2 (发布 0.3.0) ──► R3 (趋势/事件) ──�
 
 - 200 响应 `usage` 记入探测结果（JSON + 人读 `248+1 tok`），随 daemon 状态持久化
 - 实测 ping 计约 248 prompt token；剩余额度仍不可知（网关无计数器）
+
+### v0.7.0 — 三类真实报错统一分类 + 离线解释（minor）
+
+- 新增 `errors.py`：7 种 `ErrorKind`，`probe`/`diagnose`/`daemon`/`explain` 同源
+- 新命令 `explain`（零配额，支持 `--from-log` 与 stdin 管道）；
+  `diagnose --from-text/--from-log` 离线路径
+- 探测双通道判定 + 瞬时重试扩展；daemon/pool 非凭证失败分流
+  （不记健康、不冷却、不轮换；冷却仅 `available` 解除）
+- man 页补齐 `diagnose` / `explain` / `generate-config`

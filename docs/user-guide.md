@@ -1,6 +1,6 @@
 # opencode-rate-limiter 使用手册
 
-版本：0.6.2（2026-09） · 场景驱动的操作手册。
+版本：0.7.0（2026-09） · 场景驱动的操作手册。
 命令参数的完整清单与配置字段表见 [MANUAL.md](../MANUAL.md)；功能背景见
 [features.md](features.md)；遇到问题想深挖原理见
 [implementation.md](implementation.md) 与 [architecture.md](architecture.md)。

@@ -1,6 +1,6 @@
 # opencode-rate-limiter 功能详细介绍文档
 
-版本：0.6.2（2026-09） · 本文回答"每个功能是什么、解决什么问题、边界在哪"。
+版本：0.7.0（2026-09） · 本文回答"每个功能是什么、解决什么问题、边界在哪"。
 命令参数的逐项清单见 [MANUAL.md](../MANUAL.md)；实现原理见
 [implementation.md](implementation.md)。
 

@@ -35,6 +35,20 @@ class TestClassifyHttp:
         r = classify_http(500, None, "Upstream request failed: timeout")
         assert r.kind == "upstream"
 
+    def test_auth_markers(self):
+        r = classify_http(401, None, "Unauthorized: invalid api key")
+        assert r.kind == "auth"
+        assert r.normalized_type == "AuthError"
+
+    def test_server_marker_without_5xx(self):
+        r = classify_http(400, None, "Bad gateway from provider")
+        assert r.kind == "server"
+
+    def test_transient_text_in_http_body(self):
+        r = classify_http(400, None, "connection reset by peer")
+        assert r.kind == "transient_transport"
+        assert r.normalized_type == "TransientTransport"
+
     def test_5xx_is_server(self):
         r = classify_http(502, None, "Bad Gateway")
         assert r.kind == "server"
@@ -62,9 +76,18 @@ class TestClassifyTransport:
         r = classify_transport("socket closed ... encrypted_content was not issued")
         assert r.kind == "reasoning_replay"
 
+    def test_rate_markers_in_transport(self):
+        assert classify_transport("Rate limit exceeded, retry later").kind == "rate_limited"
+
+    def test_upstream_in_transport(self):
+        assert classify_transport("Upstream request failed: timeout").kind == "upstream"
+
     def test_empty_is_unknown(self):
         assert classify_transport(None).kind == "unknown"
         assert classify_transport("").kind == "unknown"
+
+    def test_unmatched_text_is_unknown(self):
+        assert classify_transport("everything is fine, nothing to see").kind == "unknown"
 
 
 class TestClassifyLogLine:
@@ -84,6 +107,9 @@ class TestClassifyLogLine:
 
     def test_empty_is_unknown(self):
         assert classify_opencode_log_line("").kind == "unknown"
+
+    def test_unmatched_text_is_unknown(self):
+        assert classify_opencode_log_line("hello world, all good").kind == "unknown"
 
 
 class TestExplainCopy:

@@ -301,10 +301,8 @@ _ERROR_TYPE_EXPLANATIONS: dict[str, tuple[str, str]] = {
 }
 
 
-def _result_kind(result: ProbeResult) -> ErrorKind:
-    """Unified kind for a probe result: stored `error_kind` wins, else classify."""
-    raw = (result.error_kind or "").strip()
-    if raw in (
+_KNOWN_ERROR_KINDS: frozenset[ErrorKind] = frozenset(
+    {
         "rate_limited",
         "transient_transport",
         "reasoning_replay",
@@ -312,8 +310,15 @@ def _result_kind(result: ProbeResult) -> ErrorKind:
         "auth",
         "server",
         "unknown",
-    ):
-        return raw  # type: ignore[return-value]
+    }
+)
+
+
+def _result_kind(result: ProbeResult) -> ErrorKind:
+    """Unified kind for a probe result: stored `error_kind` wins, else classify."""
+    raw = (result.error_kind or "").strip()
+    if raw in _KNOWN_ERROR_KINDS:
+        return raw
     return classify_http(result.http_status, result.error_type, result.error).kind
 
 
@@ -437,8 +442,7 @@ def _probe_findings(result: ProbeResult, model: str) -> tuple[list[Finding], str
                 title,
                 f"HTTP {result.http_status}，error.type: {err_type}"
                 f"\n模型: {model}\n网关原文: {(result.error or '')[:300]}\n{detail}",
-                remedy="当前会话 /clear 或开新会话（勿 --continue）；"
-                "同会话内不换模型不换账号。",
+                remedy="当前会话 /clear 或开新会话（勿 --continue）；同会话内不换模型不换账号。",
             )
         )
         findings.append(

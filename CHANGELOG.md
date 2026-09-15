@@ -5,7 +5,7 @@ All notable changes to opencode-rate-limiter will be documented in this file.
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.7.0] - 2026-09-15
 
 ### Added
 
@@ -14,9 +14,9 @@ All notable changes to opencode-rate-limiter will be documented in this file.
   `auth` / `server` / `unknown`，状态码优先、文案回退、大小写不敏感），
   `probe`/`diagnose`/`daemon`/`explain` 四方同源。
 - **`explain` 子命令（零配额）**：`explain "<报错文本>"` /
-  `explain --from-log FILE` 离线分类粘贴的 opencode 报错，不读配置、不发请求；
-  `diagnose --from-text/--from-log` 同样走离线路径。退出码沿在线语义
-  （限流 1 / 错误类 2 / 未知 0）。
+  `explain --from-log FILE` 离线分类粘贴的 opencode 报错，不读配置、不发请求，
+  无参数且 stdin 非终端时自动读管道输入；`diagnose --from-text/--from-log`
+  同样走离线路径。退出码沿在线语义（限流 1 / 错误类 2 / 未知 0）。
 - **`diagnose` 新 findings**：`RateLimitUnknown`（非 429 但限额文案的回退）、
   `ReasoningReplayError`（会话污染→`/clear`、切勿轮换账号）、
   `TransientTransport`（socket closed 类瞬断→代理/`/compact` 指引）；
@@ -40,6 +40,9 @@ All notable changes to opencode-rate-limiter will be documented in this file.
 - 达到限额时的三类报错此前被统一归为普通 `error` 或误导性网络问题；
   现分别给出可执行建议（等 UTC 午夜/换出口 IP；重试+查代理+`/compact`；
   `/clear`+不换模型不换账号）。
+- 删除 `pool.mark_result` 中不可达的 `FreeUsageLimitError` 重复分支
+  （已被统一的非凭证失败跳过逻辑覆盖）。
+- man 页补齐缺失的 `diagnose` / `explain` / `generate-config` 命令与退出码说明。
 
 ## [0.6.2] - 2026-09-14
 
